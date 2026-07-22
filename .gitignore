@@ -1,0 +1,12 @@
+.idea/
+
+# Local runtime files
+uploads/
+*.db
+*.db-shm
+*.db-wal
+
+# Build outputs
+bin/
+dist/
+*.exe
