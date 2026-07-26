@@ -1,11 +1,8 @@
 package file
 
 import (
-	"context"
 	"database/sql"
 	"errors"
-	"fmt"
-	"time"
 )
 
 var ErrFileNotFound = errors.New("file not found")
@@ -15,147 +12,168 @@ type Repository struct {
 }
 
 func NewRepository(db *sql.DB) *Repository {
-	return &Repository{db: db}
+	return &Repository{
+		db: db,
+	}
 }
 
-func (r *Repository) Create(ctx context.Context, params CreateFileParams) (UserFile, error) {
-	result, err := r.db.ExecContext(ctx,
-		`INSERT INTO user_files (user_id, original_name, storage_path, size, content_type, status)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		params.UserID,
-		params.OriginalName,
-		params.StoragePath,
-		params.Size,
-		params.ContentType,
+func (r *Repository) Create(userID int64, originalName string, storagePath string, size int64, contentType string) (*UserFile, error) {
+	result, err := r.db.Exec(
+		`INSERT INTO user_files (user_id, original_name, storage_path, size, content_type, status) VALUES (?, ?, ?, ?, ?, ?)`,
+		userID,
+		originalName,
+		storagePath,
+		size,
+		contentType,
 		StatusActive,
 	)
+
 	if err != nil {
-		return UserFile{}, fmt.Errorf("insert file metadata: %w", err)
+		return nil, err
 	}
 
 	id, err := result.LastInsertId()
 	if err != nil {
-		return UserFile{}, fmt.Errorf("read inserted file id: %w", err)
+		return nil, err
 	}
 
-	return r.FindByID(ctx, params.UserID, id)
+	return r.FindActiveByID(userID, id)
 }
 
-func (r *Repository) ListByStatus(ctx context.Context, userID int64, status string) ([]UserFile, error) {
-	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, user_id, original_name, storage_path, size, content_type, status, created_at, deleted_at
-		 FROM user_files
-		 WHERE user_id = ? AND status = ?
-		 ORDER BY created_at DESC, id DESC`,
+func (r *Repository) FindActiveByID(userID int64, fileID int64) (*UserFile, error) {
+	return r.findByIDAndStatus(userID, fileID, StatusActive)
+}
+
+func (r *Repository) FindDeletedByID(userID int64, fileID int64) (*UserFile, error) {
+	return r.findByIDAndStatus(userID, fileID, StatusDeleted)
+}
+
+func (r *Repository) ListActive(userID int64) ([]UserFile, error) {
+	return r.listByStatus(userID, StatusActive)
+}
+
+func (r *Repository) ListDeleted(userID int64) ([]UserFile, error) {
+	return r.listByStatus(userID, StatusDeleted)
+}
+
+func (r *Repository) SoftDelete(userID int64, fileID int64) error {
+	result, err := r.db.Exec(
+		`UPDATE user_files SET status = ?, deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND status = ?`,
+		StatusDeleted,
+		fileID,
+		userID,
+		StatusActive,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if affected == 0 {
+		return ErrFileNotFound
+	}
+
+	return nil
+}
+
+func (r *Repository) Restore(userID int64, fileID int64) error {
+	result, err := r.db.Exec(
+		`UPDATE user_files SET status = ?, deleted_at = NULL WHERE id = ? AND user_id = ? AND status = ?`,
+		StatusActive,
+		fileID,
+		userID,
+		StatusDeleted,
+	)
+
+	if err != nil {
+		return err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+
+	if affected == 0 {
+		return ErrFileNotFound
+	}
+
+	return nil
+}
+
+func (r *Repository) findByIDAndStatus(userID int64, fileID int64, status string) (*UserFile, error) {
+	var file UserFile
+
+	err := r.db.QueryRow(
+		`SELECT id, user_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE id = ? AND user_id = ? AND status = ?`,
+		fileID,
+		userID,
+		status,
+	).Scan(
+		&file.ID,
+		&file.UserID,
+		&file.OriginalName,
+		&file.StoragePath,
+		&file.Size,
+		&file.ContentType,
+		&file.Status,
+		&file.CreatedAt,
+		&file.DeletedAt,
+	)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrFileNotFound
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &file, nil
+}
+
+func (r *Repository) listByStatus(userID int64, status string) ([]UserFile, error) {
+	rows, err := r.db.Query(
+		`SELECT id, user_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE user_id = ? AND status = ? ORDER BY created_at DESC`,
 		userID,
 		status,
 	)
+
 	if err != nil {
-		return nil, fmt.Errorf("query files: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
 	files := make([]UserFile, 0)
+
 	for rows.Next() {
-		userFile, err := scanUserFile(rows)
-		if err != nil {
+		var file UserFile
+
+		if err := rows.Scan(
+			&file.ID,
+			&file.UserID,
+			&file.OriginalName,
+			&file.StoragePath,
+			&file.Size,
+			&file.ContentType,
+			&file.Status,
+			&file.CreatedAt,
+			&file.DeletedAt,
+		); err != nil {
 			return nil, err
 		}
-		files = append(files, userFile)
+
+		files = append(files, file)
 	}
+
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate files: %w", err)
+		return nil, err
 	}
 
 	return files, nil
-}
-
-func (r *Repository) FindByID(ctx context.Context, userID, fileID int64) (UserFile, error) {
-	row := r.db.QueryRowContext(ctx,
-		`SELECT id, user_id, original_name, storage_path, size, content_type, status, created_at, deleted_at
-		 FROM user_files
-		 WHERE user_id = ? AND id = ?`,
-		userID,
-		fileID,
-	)
-
-	userFile, err := scanUserFile(row)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return UserFile{}, ErrFileNotFound
-		}
-		return UserFile{}, err
-	}
-	return userFile, nil
-}
-
-func (r *Repository) SoftDelete(ctx context.Context, userID, fileID int64) error {
-	result, err := r.db.ExecContext(ctx,
-		`UPDATE user_files
-		 SET status = ?, deleted_at = ?
-		 WHERE user_id = ? AND id = ? AND status = ?`,
-		StatusDeleted,
-		time.Now().UTC().Format(time.RFC3339),
-		userID,
-		fileID,
-		StatusActive,
-	)
-	if err != nil {
-		return fmt.Errorf("soft delete file: %w", err)
-	}
-	return requireAffected(result)
-}
-
-func (r *Repository) Restore(ctx context.Context, userID, fileID int64) error {
-	result, err := r.db.ExecContext(ctx,
-		`UPDATE user_files
-		 SET status = ?, deleted_at = NULL
-		 WHERE user_id = ? AND id = ? AND status = ?`,
-		StatusActive,
-		userID,
-		fileID,
-		StatusDeleted,
-	)
-	if err != nil {
-		return fmt.Errorf("restore file: %w", err)
-	}
-	return requireAffected(result)
-}
-
-type scanner interface {
-	Scan(dest ...interface{}) error
-}
-
-func scanUserFile(row scanner) (UserFile, error) {
-	var userFile UserFile
-	var deletedAt sql.NullString
-	err := row.Scan(
-		&userFile.ID,
-		&userFile.UserID,
-		&userFile.OriginalName,
-		&userFile.StoragePath,
-		&userFile.Size,
-		&userFile.ContentType,
-		&userFile.Status,
-		&userFile.CreatedAt,
-		&deletedAt,
-	)
-	if err != nil {
-		return UserFile{}, err
-	}
-	if deletedAt.Valid {
-		userFile.DeletedAt = &deletedAt.String
-	}
-	return userFile, nil
-}
-
-func requireAffected(result sql.Result) error {
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("read rows affected: %w", err)
-	}
-	if rows == 0 {
-		return ErrFileNotFound
-	}
-	return nil
 }

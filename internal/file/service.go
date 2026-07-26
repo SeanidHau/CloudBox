@@ -1,17 +1,19 @@
 package file
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"io"
 )
 
-var ErrFileDeleted = errors.New("file is deleted")
+var (
+	ErrOriginalNameRequired = errors.New("original name is required")
+	ErrContentRequired      = errors.New("file content is required")
+)
 
 type Storage interface {
-	Save(ctx context.Context, userID int64, originalName string, reader io.Reader) (string, error)
-	Open(storagePath string) (io.ReadCloser, string, error)
+	Save(reader io.Reader, originalName string) (string, int64, error)
+	Open(storagePath string) (io.ReadCloser, error)
+	Delete(storagePath string) error
 }
 
 type Service struct {
@@ -20,53 +22,61 @@ type Service struct {
 }
 
 func NewService(repo *Repository, storage Storage) *Service {
-	return &Service{repo: repo, storage: storage}
+	return &Service{
+		repo:    repo,
+		storage: storage,
+	}
 }
 
-func (s *Service) Upload(ctx context.Context, params CreateFileParams, reader io.Reader) (UserFile, error) {
-	storagePath, err := s.storage.Save(ctx, params.UserID, params.OriginalName, reader)
+func (s *Service) Upload(userID int64, originalName string, contentType string, reader io.Reader) (*UserFile, error) {
+	if originalName == "" {
+		return nil, ErrOriginalNameRequired
+	}
+
+	if reader == nil {
+		return nil, ErrContentRequired
+	}
+
+	storagePath, size, err := s.storage.Save(reader, originalName)
 	if err != nil {
-		return UserFile{}, err
+		return nil, err
 	}
 
-	params.StoragePath = storagePath
-	userFile, err := s.repo.Create(ctx, params)
+	file, err := s.repo.Create(userID, originalName, storagePath, size, contentType)
 	if err != nil {
-		return UserFile{}, fmt.Errorf("save file metadata: %w", err)
+		_ = s.storage.Delete(storagePath)
+		return nil, err
 	}
 
-	return userFile, nil
+	return file, nil
 }
 
-func (s *Service) ListActive(ctx context.Context, userID int64) ([]UserFile, error) {
-	return s.repo.ListByStatus(ctx, userID, StatusActive)
+func (s *Service) ListActive(userID int64) ([]UserFile, error) {
+	return s.repo.ListActive(userID)
 }
 
-func (s *Service) ListTrash(ctx context.Context, userID int64) ([]UserFile, error) {
-	return s.repo.ListByStatus(ctx, userID, StatusDeleted)
+func (s *Service) ListDeleted(userID int64) ([]UserFile, error) {
+	return s.repo.ListDeleted(userID)
 }
 
-func (s *Service) OpenDownload(ctx context.Context, userID, fileID int64) (UserFile, io.ReadCloser, error) {
-	userFile, err := s.repo.FindByID(ctx, userID, fileID)
+func (s *Service) OpenForDownload(userID int64, fileID int64) (*UserFile, io.ReadCloser, error) {
+	file, err := s.repo.FindActiveByID(userID, fileID)
 	if err != nil {
-		return UserFile{}, nil, err
-	}
-	if userFile.Status == StatusDeleted {
-		return UserFile{}, nil, ErrFileDeleted
+		return nil, nil, err
 	}
 
-	reader, _, err := s.storage.Open(userFile.StoragePath)
+	reader, err := s.storage.Open(file.StoragePath)
 	if err != nil {
-		return UserFile{}, nil, err
+		return nil, nil, err
 	}
 
-	return userFile, reader, nil
+	return file, reader, nil
 }
 
-func (s *Service) Delete(ctx context.Context, userID, fileID int64) error {
-	return s.repo.SoftDelete(ctx, userID, fileID)
+func (s *Service) SoftDelete(userID int64, fileID int64) error {
+	return s.repo.SoftDelete(userID, fileID)
 }
 
-func (s *Service) Restore(ctx context.Context, userID, fileID int64) error {
-	return s.repo.Restore(ctx, userID, fileID)
+func (s *Service) Restore(userID int64, fileID int64) error {
+	return s.repo.Restore(userID, fileID)
 }

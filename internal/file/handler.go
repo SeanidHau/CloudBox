@@ -2,7 +2,6 @@ package file
 
 import (
 	"errors"
-	"mime"
 	"net/http"
 	"strconv"
 
@@ -15,152 +14,176 @@ type Handler struct {
 }
 
 func NewHandler(service *Service) *Handler {
-	return &Handler{service: service}
+	return &Handler{
+		service: service,
+	}
 }
 
-func (h *Handler) RegisterRoutes(router gin.IRouter) {
-	router.POST("", h.upload)
-	router.GET("", h.list)
-	router.GET("/trash", h.listTrash)
-	router.GET("/:id/download", h.download)
-	router.DELETE("/:id", h.delete)
-	router.POST("/:id/restore", h.restore)
-}
-
-func (h *Handler) upload(c *gin.Context) {
-	userID := currentUserID(c)
-	fileHeader, err := c.FormFile("file")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing file field"})
+func (h *Handler) Upload(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
 		return
 	}
 
-	uploadedFile, err := fileHeader.Open()
+	header, err := c.FormFile("file")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "open upload failed"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
 		return
 	}
-	defer uploadedFile.Close()
 
-	contentType := fileHeader.Header.Get("Content-Type")
+	src, err := header.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to open uploaded file"})
+		return
+	}
+	defer src.Close()
+
+	contentType := header.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 
-	userFile, err := h.service.Upload(c.Request.Context(), CreateFileParams{
-		UserID:       userID,
-		OriginalName: fileHeader.Filename,
-		Size:         fileHeader.Size,
-		ContentType:  contentType,
-	}, uploadedFile)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "upload file failed"})
+	savedFile, err := h.service.Upload(userID, header.Filename, contentType, src)
+	if errors.Is(err, ErrOriginalNameRequired) || errors.Is(err, ErrContentRequired) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusCreated, userFile)
-}
-
-func (h *Handler) list(c *gin.Context) {
-	files, err := h.service.ListActive(c.Request.Context(), currentUserID(c))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "list files failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to upload file"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"files": files})
+	c.JSON(http.StatusCreated, gin.H{
+		"file": savedFile,
+	})
 }
 
-func (h *Handler) listTrash(c *gin.Context) {
-	files, err := h.service.ListTrash(c.Request.Context(), currentUserID(c))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "list trash failed"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"files": files})
-}
-
-func (h *Handler) download(c *gin.Context) {
-	fileID, ok := parseFileID(c)
+func (h *Handler) ListActive(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
 		return
 	}
 
-	userFile, reader, err := h.service.OpenDownload(c.Request.Context(), currentUserID(c), fileID)
+	files, err := h.service.ListActive(userID)
 	if err != nil {
-		writeFileError(c, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list files"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"files": files,
+	})
+}
+
+func (h *Handler) ListDeleted(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	files, err := h.service.ListDeleted(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list trash"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"files": files,
+	})
+}
+
+func (h *Handler) Download(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	fileID, err := parseFileID(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	userFile, reader, err := h.service.OpenForDownload(userID, fileID)
+	if errors.Is(err, ErrFileNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to open file"})
 		return
 	}
 	defer reader.Close()
 
-	disposition := mime.FormatMediaType("attachment", map[string]string{
-		"filename": userFile.OriginalName,
-	})
-	headers := map[string]string{
-		"Content-Disposition": disposition,
-	}
-
-	c.DataFromReader(http.StatusOK, userFile.Size, userFile.ContentType, reader, headers)
+	c.Header("Content-Disposition", `attachment; filename="`+userFile.OriginalName+`"`)
+	c.Header("Content-Type", userFile.ContentType)
+	c.DataFromReader(http.StatusOK, userFile.Size, userFile.ContentType, reader, nil)
 }
 
-func (h *Handler) delete(c *gin.Context) {
-	fileID, ok := parseFileID(c)
+func (h *Handler) SoftDelete(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
 		return
 	}
 
-	if err := h.service.Delete(c.Request.Context(), currentUserID(c), fileID); err != nil {
-		writeFileError(c, err)
-		return
-	}
-
-	c.Status(http.StatusNoContent)
-}
-
-func (h *Handler) restore(c *gin.Context) {
-	fileID, ok := parseFileID(c)
-	if !ok {
-		return
-	}
-
-	if err := h.service.Restore(c.Request.Context(), currentUserID(c), fileID); err != nil {
-		writeFileError(c, err)
-		return
-	}
-
-	c.Status(http.StatusNoContent)
-}
-
-func currentUserID(c *gin.Context) int64 {
-	value, ok := c.Get(middleware.UserIDKey)
-	if !ok {
-		return 0
-	}
-
-	userID, ok := value.(int64)
-	if !ok {
-		return 0
-	}
-	return userID
-}
-
-func parseFileID(c *gin.Context) (int64, bool) {
-	fileID, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil || fileID <= 0 {
+	fileID, err := parseFileID(c)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
-		return 0, false
+		return
 	}
-	return fileID, true
+
+	err = h.service.SoftDelete(userID, fileID)
+	if errors.Is(err, ErrFileNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete file"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "file moved to trash",
+	})
 }
 
-func writeFileError(c *gin.Context, err error) {
-	switch {
-	case errors.Is(err, ErrFileNotFound):
-		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
-	case errors.Is(err, ErrFileDeleted):
-		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
-	default:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "file operation failed"})
+func (h *Handler) Restore(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
 	}
+
+	fileID, err := parseFileID(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	err = h.service.Restore(userID, fileID)
+	if errors.Is(err, ErrFileNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to restore file"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "file restored",
+	})
+}
+
+func parseFileID(c *gin.Context) (int64, error) {
+	return strconv.ParseInt(c.Param("id"), 10, 64)
 }

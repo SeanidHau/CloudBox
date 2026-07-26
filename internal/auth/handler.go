@@ -3,6 +3,7 @@ package auth
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -15,47 +16,55 @@ func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
 }
 
-func (h *Handler) RegisterRoutes(router gin.IRouter) {
-	router.POST("/register", h.register)
-	router.POST("/login", h.login)
+type authRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
-func (h *Handler) register(c *gin.Context) {
-	var req RegisterRequest
+func (h *Handler) Register(c *gin.Context) {
+	var req authRequest
+
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+
+	user, err := h.service.Register(strings.TrimSpace(req.Username), req.Password)
+	if errors.Is(err, ErrUsernameRequired) || errors.Is(err, ErrPasswordRequired) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	resp, err := h.service.Register(c.Request.Context(), req)
 	if err != nil {
-		if errors.Is(err, ErrUsernameTaken) {
-			c.JSON(http.StatusConflict, gin.H{"error": "username already exists"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "register user failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to register user"})
 		return
 	}
 
-	c.JSON(http.StatusCreated, resp)
+	c.JSON(http.StatusCreated, gin.H{
+		"user": user,
+	})
 }
 
-func (h *Handler) login(c *gin.Context) {
-	var req LoginRequest
+func (h *Handler) Login(c *gin.Context) {
+	var req authRequest
+
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
 		return
 	}
 
-	resp, err := h.service.Login(c.Request.Context(), req)
+	token, err := h.service.Login(strings.TrimSpace(req.Username), req.Password)
+	if errors.Is(err, ErrInvalidCredentials) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
+		return
+	}
+
 	if err != nil {
-		if errors.Is(err, ErrInvalidCredentials) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid username or password"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "login failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to login"})
 		return
 	}
 
-	c.JSON(http.StatusOK, resp)
+	c.JSON(http.StatusOK, gin.H{
+		"token": token,
+	})
 }

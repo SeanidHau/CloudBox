@@ -2,11 +2,12 @@ package main
 
 import (
 	"log"
+	"net/http"
 
 	"github.com/SeanidHau/CloudBox/internal/auth"
 	"github.com/SeanidHau/CloudBox/internal/config"
 	"github.com/SeanidHau/CloudBox/internal/database"
-	cloudfile "github.com/SeanidHau/CloudBox/internal/file"
+	filemodule "github.com/SeanidHau/CloudBox/internal/file"
 	"github.com/SeanidHau/CloudBox/internal/middleware"
 	"github.com/SeanidHau/CloudBox/internal/storage"
 	"github.com/gin-gonic/gin"
@@ -15,40 +16,61 @@ import (
 func main() {
 	cfg := config.Load()
 
-	db, err := database.Open(cfg.DatabasePath)
+	db, err := database.Open(cfg.DBPath)
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		log.Fatal(err)
 	}
 	defer db.Close()
 
-	localStorage, err := storage.NewLocal(cfg.UploadDir)
-	if err != nil {
-		log.Fatalf("init storage: %v", err)
+	if err := database.Migrate(db, "migrations/001_init.sql"); err != nil {
+		log.Fatal(err)
 	}
 
 	authRepo := auth.NewRepository(db)
-	authService := auth.NewService(authRepo, cfg.JWTSecret, cfg.TokenLifetime)
+	authService := auth.NewService(authRepo, cfg.JWTSecret)
 	authHandler := auth.NewHandler(authService)
 
-	fileRepo := cloudfile.NewRepository(db)
-	fileService := cloudfile.NewService(fileRepo, localStorage)
-	fileHandler := cloudfile.NewHandler(fileService)
+	r := gin.Default()
 
-	router := gin.Default()
-	router.MaxMultipartMemory = 32 << 20
-
-	router.GET("/healthz", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status": "ok",
+		})
 	})
 
-	api := router.Group("/api")
-	authHandler.RegisterRoutes(api.Group("/auth"))
+	api := r.Group("/api")
 
-	files := api.Group("/files")
-	files.Use(middleware.Auth(authService))
-	fileHandler.RegisterRoutes(files)
+	api.POST("/auth/register", authHandler.Register)
+	api.POST("/auth/login", authHandler.Login)
 
-	if err := router.Run(cfg.Addr); err != nil {
-		log.Fatalf("run api server: %v", err)
+	localStorage := storage.NewLocalStorage(cfg.UploadDir)
+	filerepo := filemodule.NewRepository(db)
+	fileService := filemodule.NewService(filerepo, localStorage)
+	fileHandler := filemodule.NewHandler(fileService)
+
+	protected := api.Group("")
+	protected.Use(middleware.Auth(cfg.JWTSecret))
+
+	protected.GET("/me", func(c *gin.Context) {
+		userID, ok := middleware.CurrentUserID(c)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"user_id": userID,
+		})
+	})
+
+	protected.POST("/files", fileHandler.Upload)
+	protected.GET("/files", fileHandler.ListActive)
+	protected.GET("/files/trash", fileHandler.ListDeleted)
+	protected.GET("/files/:id/download", fileHandler.Download)
+	protected.DELETE("/files/:id", fileHandler.SoftDelete)
+	protected.POST("/files/:id/restore", fileHandler.Restore)
+
+	if err := r.Run(cfg.HTTPAddr); err != nil {
+		log.Fatal(err)
 	}
 }

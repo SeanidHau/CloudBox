@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS user_files (
@@ -13,10 +13,10 @@ CREATE TABLE IF NOT EXISTS user_files (
     size INTEGER NOT NULL,
     content_type TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    deleted_at TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    deleted_at DATETIME,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_user_files_user_status
-    ON user_files(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_user_files_id_status
+ON user_files(user_id, status);
