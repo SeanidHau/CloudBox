@@ -41,7 +41,7 @@ func (s *LocalStorage) Save(reader io.Reader, originalName string) (string, int6
 	return storagePath, size, nil
 }
 
-func (s *LocalStorage) Open(storagePath string) (io.ReadCloser, error) {
+func (s *LocalStorage) Open(storagePath string) (io.ReadSeekCloser, error) {
 	return os.Open(storagePath)
 }
 

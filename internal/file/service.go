@@ -12,7 +12,7 @@ var (
 
 type Storage interface {
 	Save(reader io.Reader, originalName string) (string, int64, error)
-	Open(storagePath string) (io.ReadCloser, error)
+	Open(storagePath string) (io.ReadSeekCloser, error)
 	Delete(storagePath string) error
 }
 
@@ -59,7 +59,7 @@ func (s *Service) ListDeleted(userID int64) ([]UserFile, error) {
 	return s.repo.ListDeleted(userID)
 }
 
-func (s *Service) OpenForDownload(userID int64, fileID int64) (*UserFile, io.ReadCloser, error) {
+func (s *Service) OpenForDownload(userID int64, fileID int64) (*UserFile, io.ReadSeekCloser, error) {
 	file, err := s.repo.FindActiveByID(userID, fileID)
 	if err != nil {
 		return nil, nil, err

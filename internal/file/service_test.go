@@ -18,6 +18,14 @@ type fakeStorage struct {
 	openErr      error
 }
 
+type fakeReadSeekCloser struct {
+	*strings.Reader
+}
+
+func (r fakeReadSeekCloser) Close() error {
+	return nil
+}
+
 func (s *fakeStorage) Save(reader io.Reader, originalName string) (string, int64, error) {
 	if s.saveErr != nil {
 		return "", 0, s.saveErr
@@ -34,7 +42,7 @@ func (s *fakeStorage) Save(reader io.Reader, originalName string) (string, int64
 	return s.savedPath, int64(len(content)), nil
 }
 
-func (s *fakeStorage) Open(storagePath string) (io.ReadCloser, error) {
+func (s *fakeStorage) Open(storagePath string) (io.ReadSeekCloser, error) {
 	if s.openErr != nil {
 		return nil, s.openErr
 	}
@@ -43,7 +51,9 @@ func (s *fakeStorage) Open(storagePath string) (io.ReadCloser, error) {
 		return nil, errors.New("unexpected storage path")
 	}
 
-	return io.NopCloser(strings.NewReader(s.savedContent)), nil
+	return fakeReadSeekCloser{
+		Reader: strings.NewReader(s.savedContent),
+	}, nil
 }
 
 func (s *fakeStorage) Delete(storagePath string) error {

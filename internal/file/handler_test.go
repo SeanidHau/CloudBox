@@ -129,6 +129,21 @@ func TestFileHandlerLifecycle(t *testing.T) {
 		t.Fatalf("unexpected content disposition: %q", downloadResponse.Header().Get("Content-Disposition"))
 	}
 
+	rangeRequest := newAuthenticatedRequest(http.MethodGet, filePath+"/download", nil, token)
+	rangeRequest.Header.Set("Range", "bytes=6-13")
+	rangeResponse := httptest.NewRecorder()
+	router.ServeHTTP(rangeResponse, rangeRequest)
+
+	if rangeResponse.Code != http.StatusPartialContent {
+		t.Fatalf("range download status = %d, want %d", rangeResponse.Code, http.StatusPartialContent)
+	}
+	if rangeResponse.Body.String() != "cloudbox" {
+		t.Fatalf("range download content = %q, want %q", rangeResponse.Body.String(), "cloudbox")
+	}
+	if rangeResponse.Header().Get("Content-Range") != "bytes 6-13/14" {
+		t.Fatalf("content range = %q, want %q", rangeResponse.Header().Get("Content-Range"), "bytes 6-13/14")
+	}
+
 	deleteRequest := newAuthenticatedRequest(http.MethodDelete, filePath, nil, token)
 	deleteResponse := httptest.NewRecorder()
 	router.ServeHTTP(deleteResponse, deleteRequest)

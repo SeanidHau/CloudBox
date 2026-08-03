@@ -123,7 +123,7 @@ func (h *Handler) Download(c *gin.Context) {
 
 	c.Header("Content-Disposition", `attachment; filename="`+userFile.OriginalName+`"`)
 	c.Header("Content-Type", userFile.ContentType)
-	c.DataFromReader(http.StatusOK, userFile.Size, userFile.ContentType, reader, nil)
+	http.ServeContent(c.Writer, c.Request, userFile.OriginalName, userFile.CreatedAt, reader)
 }
 
 func (h *Handler) SoftDelete(c *gin.Context) {
