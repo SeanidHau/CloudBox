@@ -22,7 +22,11 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := database.Migrate(db, "migrations/001_init.sql"); err != nil {
+	if err := database.Migrate(
+		db,
+		"migrations/001_init.sql",
+		"migrations/002_file_objects.sql",
+	); err != nil {
 		log.Fatal(err)
 	}
 
