@@ -2,6 +2,8 @@ package file
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -31,6 +33,7 @@ func newTestFileRouter(t *testing.T) (*gin.Engine, string) {
 	protected := router.Group("")
 	protected.Use(middleware.Auth(testJWTSecret))
 	protected.POST("/files", handler.Upload)
+	protected.POST("/files/instant", handler.InstantUpload)
 	protected.GET("/files", handler.ListActive)
 	protected.GET("/files/trash", handler.ListDeleted)
 	protected.GET("/files/:id/download", handler.Download)
@@ -206,5 +209,67 @@ func TestFileHandlerRejectsInvalidFileID(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "invalid file id") {
 		t.Fatalf("unexpected response body: %s", response.Body.String())
+	}
+}
+
+func TestFileHandlerInstantUpload(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	const content = "same content"
+
+	var uploadBody bytes.Buffer
+	writer := multipart.NewWriter(&uploadBody)
+	part, err := writer.CreateFormFile("file", "original.txt")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := part.Write([]byte(content)); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	uploadRequest := newAuthenticatedRequest(http.MethodPost, "/files", &uploadBody, token)
+	uploadRequest.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadResponse := httptest.NewRecorder()
+	router.ServeHTTP(uploadResponse, uploadRequest)
+	if uploadResponse.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, want %d: %s", uploadResponse.Code, http.StatusCreated, uploadResponse.Body.String())
+	}
+
+	hash := sha256.Sum256([]byte(content))
+	instantBody, err := json.Marshal(instantUploadRequest{
+		OriginalName: "instant-copy.txt",
+		FileHash:     hex.EncodeToString(hash[:]),
+	})
+	if err != nil {
+		t.Fatalf("encode instant upload request: %v", err)
+	}
+
+	instantRequest := newAuthenticatedRequest(http.MethodPost, "/files/instant", bytes.NewReader(instantBody), token)
+	instantRequest.Header.Set("Content-Type", "application/json")
+	instantResponse := httptest.NewRecorder()
+	router.ServeHTTP(instantResponse, instantRequest)
+
+	if instantResponse.Code != http.StatusCreated {
+		t.Fatalf("instant upload status = %d, want %d: %s", instantResponse.Code, http.StatusCreated, instantResponse.Body.String())
+	}
+
+	missingBody, err := json.Marshal(instantUploadRequest{
+		OriginalName: "missing.txt",
+		FileHash:     "missing-hash",
+	})
+	if err != nil {
+		t.Fatalf("encode missing instant upload request: %v", err)
+	}
+
+	missingRequest := newAuthenticatedRequest(http.MethodPost, "/files/instant", bytes.NewReader(missingBody), token)
+	missingRequest.Header.Set("Content-Type", "application/json")
+	missingResponse := httptest.NewRecorder()
+	router.ServeHTTP(missingResponse, missingRequest)
+
+	if missingResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing hash status = %d, want %d: %s", missingResponse.Code, http.StatusNotFound, missingResponse.Body.String())
 	}
 }

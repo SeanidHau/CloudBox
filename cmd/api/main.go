@@ -68,6 +68,7 @@ func main() {
 	})
 
 	protected.POST("/files", fileHandler.Upload)
+	protected.POST("/files/instant", fileHandler.InstantUpload)
 	protected.GET("/files", fileHandler.ListActive)
 	protected.GET("/files/trash", fileHandler.ListDeleted)
 	protected.GET("/files/:id/download", fileHandler.Download)

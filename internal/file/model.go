@@ -21,3 +21,13 @@ type UserFile struct {
 	CreatedAt    time.Time    `json:"created_at"`
 	DeletedAt    sql.NullTime `json:"-"`
 }
+
+type FileObject struct {
+	ID             int64     `json:"id"`
+	FileHash       string    `json:"file_hash"`
+	StoragePath    string    `json:"storage_path"`
+	Size           int64     `json:"size"`
+	ContentType    string    `json:"content_type"`
+	ReferenceCount int       `json:"reference_count"`
+	CreatedAt      time.Time `json:"created_at"`
+}

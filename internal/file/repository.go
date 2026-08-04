@@ -5,7 +5,10 @@ import (
 	"errors"
 )
 
-var ErrFileNotFound = errors.New("file not found")
+var (
+	ErrFileNotFound       = errors.New("file not found")
+	ErrFileObjectNotFound = errors.New("file object not found")
+)
 
 type Repository struct {
 	db *sql.DB
@@ -176,4 +179,107 @@ func (r *Repository) listByStatus(userID int64, status string) ([]UserFile, erro
 	}
 
 	return files, nil
+}
+
+func (r *Repository) CreateFileObject(
+	fileHash string,
+	storagePath string,
+	size int64,
+	contentType string,
+) (*FileObject, error) {
+	_, err := r.db.Exec(
+		`INSERT INTO file_objects (file_hash, storage_path, size, content_type, reference_count) VALUES (?, ?, ?, ?, 0)`,
+		fileHash,
+		storagePath,
+		size,
+		contentType,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return r.FindFileObjectByHash(fileHash)
+}
+
+func (r *Repository) FindFileObjectByHash(fileHash string) (*FileObject, error) {
+	var object FileObject
+
+	err := r.db.QueryRow(
+		`SELECT id, file_hash, storage_path, size, content_type, reference_count, created_at FROM file_objects WHERE file_hash = ?`,
+		fileHash,
+	).Scan(
+		&object.ID,
+		&object.FileHash,
+		&object.StoragePath,
+		&object.Size,
+		&object.ContentType,
+		&object.ReferenceCount,
+		&object.CreatedAt,
+	)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrFileObjectNotFound
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &object, nil
+}
+
+func (r *Repository) CreateWithObject(
+	userId int64,
+	originalName string,
+	object *FileObject,
+) (*UserFile, error) {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := tx.Exec(
+		`INSERT INTO user_files (user_id, object_id, original_name, storage_path, size, content_type, status) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		userId,
+		object.ID,
+		originalName,
+		object.StoragePath,
+		object.Size,
+		object.ContentType,
+		StatusActive,
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+
+	updateResult, err := tx.Exec(
+		`UPDATE file_objects SET reference_count = reference_count + 1 WHERE id = ?`,
+		object.ID,
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+
+	affected, err := updateResult.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if affected == 0 {
+		_ = tx.Rollback()
+		return nil, ErrFileObjectNotFound
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	fileID, err := result.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+
+	return r.FindActiveByID(userId, fileID)
 }

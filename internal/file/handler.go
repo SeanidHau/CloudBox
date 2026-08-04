@@ -13,6 +13,11 @@ type Handler struct {
 	service *Service
 }
 
+type instantUploadRequest struct {
+	OriginalName string `json:"original_name"`
+	FileHash     string `json:"file_hash"`
+}
+
 func NewHandler(service *Service) *Handler {
 	return &Handler{
 		service: service,
@@ -186,4 +191,36 @@ func (h *Handler) Restore(c *gin.Context) {
 
 func parseFileID(c *gin.Context) (int64, error) {
 	return strconv.ParseInt(c.Param("id"), 10, 64)
+}
+
+func (h *Handler) InstantUpload(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	var req instantUploadRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+
+	savedFile, err := h.service.InstantUpload(userID, req.OriginalName, req.FileHash)
+	if errors.Is(err, ErrOriginalNameRequired) || errors.Is(err, ErrFileHashRequired) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFileObjectNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file object not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create instant upload"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"file": savedFile,
+	})
 }

@@ -3,15 +3,17 @@ package file
 import (
 	"errors"
 	"io"
+	"strings"
 )
 
 var (
 	ErrOriginalNameRequired = errors.New("original name is required")
 	ErrContentRequired      = errors.New("file content is required")
+	ErrFileHashRequired     = errors.New("file hash is required")
 )
 
 type Storage interface {
-	Save(reader io.Reader, originalName string) (string, int64, error)
+	Save(reader io.Reader, originalName string) (string, int64, string, error)
 	Open(storagePath string) (io.ReadSeekCloser, error)
 	Delete(storagePath string) error
 }
@@ -37,18 +39,43 @@ func (s *Service) Upload(userID int64, originalName string, contentType string, 
 		return nil, ErrContentRequired
 	}
 
-	storagePath, size, err := s.storage.Save(reader, originalName)
+	storagePath, size, fileHash, err := s.storage.Save(reader, originalName)
 	if err != nil {
 		return nil, err
 	}
 
-	file, err := s.repo.Create(userID, originalName, storagePath, size, contentType)
-	if err != nil {
+	object, err := s.repo.FindFileObjectByHash(fileHash)
+
+	if err == nil {
+		if err := s.storage.Delete(storagePath); err != nil {
+			return nil, err
+		}
+	} else if errors.Is(err, ErrFileObjectNotFound) {
+		object, err = s.repo.CreateFileObject(
+			fileHash,
+			storagePath,
+			size,
+			contentType,
+		)
+		if err != nil {
+			existingObject, findErr := s.repo.FindFileObjectByHash(fileHash)
+			if findErr != nil {
+				_ = s.storage.Delete(storagePath)
+				return nil, err
+			}
+
+			object = existingObject
+
+			if err := s.storage.Delete(storagePath); err != nil {
+				return nil, err
+			}
+		}
+	} else {
 		_ = s.storage.Delete(storagePath)
 		return nil, err
 	}
 
-	return file, nil
+	return s.repo.CreateWithObject(userID, originalName, object)
 }
 
 func (s *Service) ListActive(userID int64) ([]UserFile, error) {
@@ -79,4 +106,23 @@ func (s *Service) SoftDelete(userID int64, fileID int64) error {
 
 func (s *Service) Restore(userID int64, fileID int64) error {
 	return s.repo.Restore(userID, fileID)
+}
+
+func (s *Service) InstantUpload(userID int64, originalName string, fileHash string) (*UserFile, error) {
+	originalName = strings.TrimSpace(originalName)
+	fileHash = strings.TrimSpace(fileHash)
+
+	if originalName == "" {
+		return nil, ErrOriginalNameRequired
+	}
+	if fileHash == "" {
+		return nil, ErrFileHashRequired
+	}
+
+	object, err := s.repo.FindFileObjectByHash(fileHash)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.repo.CreateWithObject(userID, originalName, object)
 }

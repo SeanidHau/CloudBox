@@ -19,7 +19,11 @@ func newTestRepository(t *testing.T) *Repository {
 		_ = db.Close()
 	})
 
-	if err := database.Migrate(db, "../../migrations/001_init.sql"); err != nil {
+	if err := database.Migrate(
+		db,
+		"../../migrations/001_init.sql",
+		"../../migrations/002_file_objects.sql",
+	); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
 
@@ -89,5 +93,43 @@ func TestRepositoryCreateListSoftDeleteAndRestore(t *testing.T) {
 	}
 	if restored.Status != StatusActive {
 		t.Fatalf("restored status = %q, want %q", restored.Status, StatusActive)
+	}
+}
+
+func TestRepositoryCreateAndFindFileObject(t *testing.T) {
+	repo := newTestRepository(t)
+
+	created, err := repo.CreateFileObject(
+		"a9c2a8c997d2a80c4756e14b6c80e7a5ed8f0262ba1e430ac0c0e751ea0b3abe",
+		"uploads/object.txt",
+		15,
+		"text/plain",
+	)
+	if err != nil {
+		t.Fatalf("create file object: %v", err)
+	}
+	if created.ID == 0 {
+		t.Fatal("expected file object ID")
+	}
+	if created.ReferenceCount != 0 {
+		t.Fatalf("reference count = %d, want 0", created.ReferenceCount)
+	}
+
+	found, err := repo.FindFileObjectByHash(created.FileHash)
+	if err != nil {
+		t.Fatalf("find file object: %v", err)
+	}
+	if found.ID != created.ID {
+		t.Fatalf("found object ID = %d, want %d", found.ID, created.ID)
+	}
+	if found.StoragePath != "uploads/object.txt" {
+		t.Fatalf("storage path = %q, want %q", found.StoragePath, "uploads/object.txt")
+	}
+	if found.Size != 15 {
+		t.Fatalf("size = %d, want %d", found.Size, 15)
+	}
+
+	if _, err := repo.FindFileObjectByHash("missing-hash"); !errors.Is(err, ErrFileObjectNotFound) {
+		t.Fatalf("missing object error = %v, want %v", err, ErrFileObjectNotFound)
 	}
 }
