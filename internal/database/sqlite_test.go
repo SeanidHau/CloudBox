@@ -124,3 +124,61 @@ func TestMigrateBackfillsLegacyFilesIntoFileObjects(t *testing.T) {
 		t.Fatalf("file object count = %d, want 1", objectCount)
 	}
 }
+
+func TestMigrateCreatesUploadTasksAndChunks(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+
+	initMigration := "../../migrations/001_init.sql"
+	fileObjectsMigration := "../../migrations/002_file_objects.sql"
+	uploadTasksMigration := "../../migrations/003_upload_tasks.sql"
+	fixUploadChunksMigration := "../../migrations/004_fix_upload_chunks.sql"
+	if err := Migrate(db, initMigration, fileObjectsMigration, uploadTasksMigration, fixUploadChunksMigration); err != nil {
+		t.Fatalf("apply upload task migrations: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO users (id, username, password_hash) VALUES (1, 'sean', 'hash')`); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO upload_tasks (
+			id, user_id, original_name, content_type,
+			file_size, chunk_size, total_chunks, temp_dir
+		) VALUES ('upload-1', 1, 'video.mp4', 'video/mp4', 25, 10, 3, 'uploads/tmp/upload-1')
+	`); err != nil {
+		t.Fatalf("insert upload task: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO upload_chunks (upload_id, chunk_number, size, chunk_hash)
+		VALUES ('upload-1', 0, 10, 'chunk-hash')
+	`); err != nil {
+		t.Fatalf("insert upload chunk: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO upload_chunks (upload_id, chunk_number, size)
+		VALUES ('upload-1', 0, 10)
+	`); err == nil {
+		t.Fatal("expected duplicate chunk number to fail")
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO upload_chunks (upload_id, chunk_number, size)
+		VALUES ('missing-upload', 1, 10)
+	`); err == nil {
+		t.Fatal("expected missing upload task to fail")
+	}
+
+	if err := Migrate(db, initMigration, fileObjectsMigration, uploadTasksMigration, fixUploadChunksMigration); err != nil {
+		t.Fatalf("reapply upload task migrations: %v", err)
+	}
+}

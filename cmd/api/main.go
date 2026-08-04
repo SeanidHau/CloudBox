@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"path/filepath"
 
 	"github.com/SeanidHau/CloudBox/internal/auth"
 	"github.com/SeanidHau/CloudBox/internal/config"
@@ -10,6 +11,7 @@ import (
 	filemodule "github.com/SeanidHau/CloudBox/internal/file"
 	"github.com/SeanidHau/CloudBox/internal/middleware"
 	"github.com/SeanidHau/CloudBox/internal/storage"
+	uploadmodule "github.com/SeanidHau/CloudBox/internal/upload"
 	"github.com/gin-gonic/gin"
 )
 
@@ -26,6 +28,8 @@ func main() {
 		db,
 		"migrations/001_init.sql",
 		"migrations/002_file_objects.sql",
+		"migrations/003_upload_tasks.sql",
+		"migrations/004_fix_upload_chunks.sql",
 	); err != nil {
 		log.Fatal(err)
 	}
@@ -52,6 +56,13 @@ func main() {
 	fileService := filemodule.NewService(filerepo, localStorage)
 	fileHandler := filemodule.NewHandler(fileService)
 
+	uploadRepo := uploadmodule.NewRepository(db)
+	uploadService := uploadmodule.NewService(
+		uploadRepo,
+		filepath.Join(cfg.UploadDir, "tmp"),
+	)
+	uploadHandler := uploadmodule.NewHandler(uploadService)
+
 	protected := api.Group("")
 	protected.Use(middleware.Auth(cfg.JWTSecret))
 
@@ -74,6 +85,7 @@ func main() {
 	protected.GET("/files/:id/download", fileHandler.Download)
 	protected.DELETE("/files/:id", fileHandler.SoftDelete)
 	protected.POST("/files/:id/restore", fileHandler.Restore)
+	protected.POST("/uploads/init", uploadHandler.Init)
 
 	if err := r.Run(cfg.HTTPAddr); err != nil {
 		log.Fatal(err)
