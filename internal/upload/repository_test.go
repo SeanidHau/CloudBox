@@ -86,3 +86,106 @@ func TestRepositoryCreateAndFindUploadTask(t *testing.T) {
 		t.Fatalf("other user find error = %v, want %v", err, ErrTaskNotFound)
 	}
 }
+
+func TestRepositoryUpsertAndListChunks(t *testing.T) {
+	repo := newTestRepository(t)
+
+	if _, err := repo.Create(&Task{
+		ID:           "upload-1",
+		UserID:       1,
+		OriginalName: "video.mp4",
+		ContentType:  "video/mp4",
+		FileSize:     25,
+		ChunkSize:    10,
+		TotalChunks:  3,
+		Status:       StatusUploading,
+		TempDir:      "uploads/tmp/upload-1",
+	}); err != nil {
+		t.Fatalf("create upload task: %v", err)
+	}
+
+	first, err := repo.UpsertChunk(&Chunk{
+		UploadID: "upload-1",
+		Number:   1,
+		Size:     10,
+		Hash: sql.NullString{
+			String: "first-hash",
+			Valid:  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("upsert first chunk: %v", err)
+	}
+	if first.Number != 1 || first.Size != 10 {
+		t.Fatalf("first chunk = %#v, want number 1 and size 10", first)
+	}
+
+	updated, err := repo.UpsertChunk(&Chunk{
+		UploadID: "upload-1",
+		Number:   1,
+		Size:     8,
+		Hash: sql.NullString{
+			String: "updated-hash",
+			Valid:  true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("upsert existing chunk: %v", err)
+	}
+	if updated.Size != 8 || updated.Hash.String != "updated-hash" {
+		t.Fatalf("updated chunk = %#v, want new size and hash", updated)
+	}
+
+	if _, err := repo.UpsertChunk(&Chunk{UploadID: "upload-1", Number: 0, Size: 10}); err != nil {
+		t.Fatalf("upsert chunk zero: %v", err)
+	}
+
+	chunks, err := repo.ListChunks("upload-1")
+	if err != nil {
+		t.Fatalf("list chunks: %v", err)
+	}
+	if len(chunks) != 2 {
+		t.Fatalf("chunk count = %d, want 2", len(chunks))
+	}
+	if chunks[0].Number != 0 || chunks[1].Number != 1 {
+		t.Fatalf("chunk order = %#v, want 0 then 1", chunks)
+	}
+
+	if _, err := repo.FindChunk("upload-1", 2); !errors.Is(err, ErrChunkNotFound) {
+		t.Fatalf("missing chunk error = %v, want %v", err, ErrChunkNotFound)
+	}
+}
+
+func TestRepositoryUpdateStatus(t *testing.T) {
+	repo := newTestRepository(t)
+
+	if _, err := repo.Create(&Task{
+		ID:           "upload-1",
+		UserID:       1,
+		OriginalName: "video.mp4",
+		ContentType:  "video/mp4",
+		FileSize:     10,
+		ChunkSize:    10,
+		TotalChunks:  1,
+		Status:       StatusUploading,
+		TempDir:      "uploads/tmp/upload-1",
+	}); err != nil {
+		t.Fatalf("create upload task: %v", err)
+	}
+
+	if err := repo.UpdateStatus(1, "upload-1", StatusCompleting); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+
+	task, err := repo.FindByID(1, "upload-1")
+	if err != nil {
+		t.Fatalf("find updated task: %v", err)
+	}
+	if task.Status != StatusCompleting {
+		t.Fatalf("status = %q, want %q", task.Status, StatusCompleting)
+	}
+
+	if err := repo.UpdateStatus(2, "upload-1", StatusCompleted); !errors.Is(err, ErrTaskNotFound) {
+		t.Fatalf("other user update error = %v, want %v", err, ErrTaskNotFound)
+	}
+}

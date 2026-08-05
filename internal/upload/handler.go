@@ -3,6 +3,7 @@ package upload
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/SeanidHau/CloudBox/internal/middleware"
 	"github.com/gin-gonic/gin"
@@ -58,4 +59,92 @@ func (h *Handler) Init(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"upload": task,
 	})
+}
+
+func (h *Handler) UploadChunk(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	chunkNumber, err := strconv.ParseInt(c.Param("number"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid chunk number"})
+		return
+	}
+
+	chunk, err := h.service.UploadChunk(
+		userID,
+		c.Param("id"),
+		chunkNumber,
+		c.Request.Body,
+	)
+	if errors.Is(err, ErrTaskNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrChunkNumberInvalid) ||
+		errors.Is(err, ErrChunkSizeMismatch) ||
+		errors.Is(err, ErrChunkContentRequired) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrTaskNotUploading) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to upload chunk"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"chunk": chunk})
+}
+
+func (h *Handler) GetStatus(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	status, err := h.service.GetStatus(userID, c.Param("id"))
+	if errors.Is(err, ErrTaskNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get upload status"})
+		return
+	}
+
+	c.JSON(http.StatusOK, status)
+}
+
+func (h *Handler) Complete(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	userFile, err := h.service.Complete(userID, c.Param("id"))
+	if errors.Is(err, ErrTaskNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": ErrTaskNotFound.Error()})
+		return
+	}
+	if errors.Is(err, ErrTaskNotUploading) ||
+		errors.Is(err, ErrChunksIncomplete) ||
+		errors.Is(err, ErrChunkHashMismatch) ||
+		errors.Is(err, ErrFileHashMismatch) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to complete upload"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"file": userFile})
 }

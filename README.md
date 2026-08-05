@@ -1,124 +1,84 @@
 # CloudBox
 
-CloudBox 是一个用 Go 编写的文件存储学习项目。第一阶段先实现一个小而完整的文件存储 API，用来练习 Go Web 开发、JWT 鉴权、SQLite 持久化、分层架构和流式文件上传下载。
+CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件存储 API 起步，逐步加入内容去重、HTTP Range 下载，以及大文件分片上传和断点续传。
 
-项目最终目标是逐步扩展成一个简化版网盘系统，后续会加入大文件分片上传、断点续传、秒传、对象存储、分享链接和异步处理等能力。
+## 当前进度
 
-## 当前阶段
+### 已完成
 
-当前实现的是 Stage 1：本地文件存储 API。
+- [x] 用户注册、bcrypt 密码哈希与 JWT 登录
+- [x] JWT 鉴权和按用户隔离的数据访问
+- [x] 小文件流式上传、文件列表、下载、软删除与回收站恢复
+- [x] HTTP Range 下载
+- [x] `file_objects` 与 `user_files` 分离
+- [x] SHA-256 内容去重和秒传
+- [x] 分片上传初始化、乱序上传与重复分片覆盖
+- [x] 上传进度查询，支持客户端识别缺失分片
+- [x] 分片哈希、完整文件哈希和总大小校验
+- [x] 分片合并为正式文件，并复用既有的去重存储流程
+- [x] Repository、Service 和 HTTP Handler 的自动化测试
+- [x] 真实 HTTP 端到端验证：初始化、三块上传、合并、下载校验
 
-Stage 1 的重点不是一次性做完整网盘，而是先把后端基础打通：
+### 未完成
 
-- 用户注册
-- 用户登录
-- JWT 鉴权
-- 小文件上传
-- 文件列表
-- 文件下载
-- 文件软删除
-- 回收站列表
-- 从回收站恢复文件
-- SQLite 保存元数据
-- 本地磁盘保存文件内容
+- [ ] 取消上传和定期清理过期临时分片
+- [ ] 并发完成请求的互斥与幂等处理
+- [ ] 文件夹、重命名、移动和存储配额
+- [ ] 分享链接、密码、过期时间和下载次数限制
+- [ ] PostgreSQL、MinIO 和 Redis 的生产化替换
+- [ ] 异步任务，例如缩略图、病毒扫描和失败重试
+- [ ] Docker Compose、GitHub Actions、指标、日志和链路追踪
+- [ ] Web 前端
 
 ## 技术栈
 
 - Go
 - Gin
 - SQLite
-- JWT
-- bcrypt
+- JWT + bcrypt
 - 本地磁盘存储
+- SHA-256
 
-## 项目结构
-
-```text
-cmd/
-└── api/
-    └── main.go
-
-internal/
-├── auth/
-│   ├── handler.go
-│   ├── model.go
-│   ├── repository.go
-│   └── service.go
-├── config/
-│   └── config.go
-├── database/
-│   └── sqlite.go
-├── file/
-│   ├── handler.go
-│   ├── model.go
-│   ├── repository.go
-│   └── service.go
-├── middleware/
-│   └── auth.go
-└── storage/
-    └── local.go
-
-migrations/
-└── 001_init.sql
-
-uploads/
-```
-
-## 分层说明
-
-项目使用分层单体结构：
-
-- `handler`：处理 HTTP 请求和响应
-- `service`：处理业务逻辑
-- `repository`：处理数据库读写
-- `storage`：处理文件内容读写
-- `middleware`：处理 JWT 鉴权
-
-这样做的好处是：第一阶段代码不会太复杂，同时后续替换 PostgreSQL、MinIO、Redis 时也比较容易。
-
-## 数据模型
-
-### users
+## 架构
 
 ```text
-id
-username
-password_hash
-created_at
+HTTP 请求
+    |
+Handler      解析请求、返回状态码和 JSON
+    |
+Service      执行业务规则、权限边界和文件流程
+    |
+Repository   访问 SQLite
+    |
+Storage      保存、打开和删除物理文件
 ```
 
-### user_files
+主要目录：
 
 ```text
-id
-user_id
-original_name
-storage_path
-size
-content_type
-status
-created_at
-deleted_at
+cmd/api/             API 入口和路由组装
+internal/auth/       注册、登录与 JWT
+internal/file/       用户文件、去重和下载
+internal/upload/     上传任务、分片、进度和合并
+internal/storage/    本地文件存储
+internal/database/   SQLite 和版本化迁移
+migrations/          数据库迁移 SQL
+docs/                学习设计和历史计划
 ```
 
-`status` 当前只使用两个值：
+## 启动
 
-- `active`
-- `deleted`
-
-## 启动项目
-
-安装依赖：
+本机 Go 安装在 `/usr/local/go/bin/go` 时：
 
 ```bash
-go mod tidy
+/usr/local/go/bin/go test ./...
+/usr/local/go/bin/go run ./cmd/api
 ```
 
-启动 API：
+服务默认监听 `http://localhost:8080`，本地运行时会创建：
 
-```bash
-go run ./cmd/api
-```
+- `cloudbox.db`：SQLite 数据库
+- `uploads/`：正式文件和上传临时分片
 
 健康检查：
 
@@ -126,150 +86,110 @@ go run ./cmd/api
 curl http://localhost:8080/health
 ```
 
-期望返回：
+## API 一览
 
-```json
-{"status":"ok"}
+所有 `/api` 下除认证接口外的路由都需要：
+
+```text
+Authorization: Bearer <JWT>
 ```
 
-## API 示例
+| 功能 | 方法与路径 |
+| --- | --- |
+| 注册 | `POST /api/auth/register` |
+| 登录 | `POST /api/auth/login` |
+| 上传小文件 | `POST /api/files` |
+| 秒传 | `POST /api/files/instant` |
+| 活跃文件列表 | `GET /api/files` |
+| 回收站 | `GET /api/files/trash` |
+| 下载或 Range 下载 | `GET /api/files/:id/download` |
+| 软删除 | `DELETE /api/files/:id` |
+| 恢复文件 | `POST /api/files/:id/restore` |
+| 初始化分片上传 | `POST /api/uploads/init` |
+| 上传一个分片 | `PUT /api/uploads/:id/chunks/:number` |
+| 查询上传状态 | `GET /api/uploads/:id` |
+| 合并并完成上传 | `POST /api/uploads/:id/complete` |
 
-### 注册
+## 分片上传流程
+
+```text
+客户端声明文件大小和分片大小
+    |
+POST /api/uploads/init
+    |
+得到 upload_id 和 total_chunks
+    |
+PUT /api/uploads/:id/chunks/0..N-1
+    |
+GET /api/uploads/:id 查询已完成分片
+    |
+POST /api/uploads/:id/complete
+    |
+校验每块哈希、按编号合并、校验完整哈希
+    |
+创建 user_file，并复用 file_object 去重
+```
+
+分片编号从 `0` 开始。最后一块可以小于普通分片大小；其他分片必须与初始化时声明的大小一致。
+
+## 最小使用示例
+
+登录后将响应中的 token 保存到当前终端：
 
 ```bash
-curl -X POST http://localhost:8080/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"sean","password":"123456"}'
+export TOKEN='登录响应中的 token'
 ```
 
-### 登录
+初始化一个 25 字节、每块 10 字节的上传任务：
 
 ```bash
-curl -X POST http://localhost:8080/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"sean","password":"123456"}'
-```
-
-登录成功后会返回 token：
-
-```json
-{"token":"your.jwt.token"}
-```
-
-设置环境变量：
-
-```bash
-TOKEN="your.jwt.token"
-```
-
-### 查看当前用户
-
-```bash
-curl http://localhost:8080/api/me \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-### 上传文件
-
-```bash
-echo "hello cloudbox" > test.txt
-
-curl -X POST http://localhost:8080/api/files \
+curl -X POST http://localhost:8080/api/uploads/init \
   -H "Authorization: Bearer $TOKEN" \
-  -F "file=@test.txt"
+  -H "Content-Type: application/json" \
+  -d '{
+    "original_name":"video.mp4",
+    "content_type":"video/mp4",
+    "file_size":25,
+    "chunk_size":10
+  }'
 ```
 
-### 查看文件列表
+从响应中读取 `upload.id` 并设为 `UPLOAD_ID` 后，上传分片：
 
 ```bash
-curl http://localhost:8080/api/files \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-### 下载文件
-
-```bash
-curl http://localhost:8080/api/files/1/download \
+curl -X PUT "http://localhost:8080/api/uploads/$UPLOAD_ID/chunks/0" \
   -H "Authorization: Bearer $TOKEN" \
-  -o downloaded-test.txt
-```
+  --data-binary '0123456789'
 
-### 删除文件
+curl -X PUT "http://localhost:8080/api/uploads/$UPLOAD_ID/chunks/1" \
+  -H "Authorization: Bearer $TOKEN" \
+  --data-binary 'abcdefghij'
 
-这里的删除是软删除，只会把文件移入回收站，不会立刻删除数据库记录。
+curl -X PUT "http://localhost:8080/api/uploads/$UPLOAD_ID/chunks/2" \
+  -H "Authorization: Bearer $TOKEN" \
+  --data-binary '12345'
 
-```bash
-curl -X DELETE http://localhost:8080/api/files/1 \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-### 查看回收站
-
-```bash
-curl http://localhost:8080/api/files/trash \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-### 恢复文件
-
-```bash
-curl -X POST http://localhost:8080/api/files/1/restore \
-  -H "Authorization: Bearer $TOKEN"
+curl -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8080/api/uploads/$UPLOAD_ID/complete"
 ```
 
 ## 学习重点
 
-这个阶段需要重点理解：
+- Handler、Service、Repository 和 Storage 的职责边界
+- `io.Reader`、`io.Copy` 和流式读写如何避免大文件一次性进入内存
+- JWT 中间件如何将用户身份传递到业务层
+- SQL 查询为什么必须带 `user_id` 以防止越权
+- SHA-256 如何用于分片校验、完整性校验和内容去重
+- 上传任务状态为何要经历 `uploading -> completing -> completed`
+- `defer` 如何在失败时恢复状态并清理临时文件
 
-- Gin 如何注册路由
-- handler 如何解析 JSON、表单和路径参数
-- middleware 如何拦截请求并写入上下文
-- bcrypt 为什么可以保护密码
-- JWT 如何携带用户身份
-- repository 为什么只负责数据库
-- service 为什么负责业务规则
-- `io.Reader`、`io.ReadCloser` 和 `io.Copy` 如何实现流式文件处理
-- 为什么上传文件时不能一次性读入内存
-- 为什么所有文件查询都必须带 `user_id`
+## 验证状态
 
-## 当前完成标准
+当前代码已通过：
 
-Stage 1 完成后应该满足：
+```bash
+/usr/local/go/bin/go test ./...
+```
 
-- 服务可以用一条命令启动
-- 用户可以注册和登录
-- 登录后可以拿到 JWT
-- 文件接口必须携带 JWT
-- 用户只能看到自己的文件
-- 用户只能下载自己的 active 文件
-- 删除文件会进入回收站
-- 回收站文件可以恢复
-- 文件内容保存在本地磁盘
-- 文件元数据保存在 SQLite
-
-## 后续计划
-
-Stage 2 会把项目升级成更接近真实网盘的系统：
-
-- PostgreSQL
-- MinIO
-- 文件 SHA-256 哈希
-- 秒传
-- 文件去重
-- 分片上传
-- 断点续传
-- HTTP Range 下载
-- 分享链接
-- Redis 上传状态和限流
-
-Stage 3 会补工程化能力：
-
-- Redis Streams 异步任务
-- 缩略图生成
-- 失败任务重试
-- 过期上传清理
-- Prometheus 指标
-- OpenTelemetry 链路追踪
-- 结构化日志
-- Docker Compose
-- GitHub Actions
+并已通过本地 HTTP 端到端验证：注册、登录、初始化上传、三块分片上传、状态查询、合并完成、下载内容比对。

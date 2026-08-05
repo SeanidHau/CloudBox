@@ -26,3 +26,16 @@ type Task struct {
 	CreatedAt    time.Time      `json:"created_at"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 }
+
+type Chunk struct {
+	UploadID  string         `json:"upload_id"`
+	Number    int64          `json:"number"`
+	Size      int64          `json:"size"`
+	Hash      sql.NullString `json:"-"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+type UploadStatus struct {
+	Upload *Task   `json:"upload"`
+	Chunks []Chunk `json:"chunks"`
+}

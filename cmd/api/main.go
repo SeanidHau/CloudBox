@@ -60,6 +60,7 @@ func main() {
 	uploadService := uploadmodule.NewService(
 		uploadRepo,
 		filepath.Join(cfg.UploadDir, "tmp"),
+		fileService,
 	)
 	uploadHandler := uploadmodule.NewHandler(uploadService)
 
@@ -86,6 +87,9 @@ func main() {
 	protected.DELETE("/files/:id", fileHandler.SoftDelete)
 	protected.POST("/files/:id/restore", fileHandler.Restore)
 	protected.POST("/uploads/init", uploadHandler.Init)
+	protected.PUT("/uploads/:id/chunks/:number", uploadHandler.UploadChunk)
+	protected.POST("/uploads/:id/complete", uploadHandler.Complete)
+	protected.GET("/uploads/:id", uploadHandler.GetStatus)
 
 	if err := r.Run(cfg.HTTPAddr); err != nil {
 		log.Fatal(err)

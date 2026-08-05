@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -25,6 +26,9 @@ func newTestHandlerRouter(t *testing.T) (*gin.Engine, string) {
 	protected := router.Group("")
 	protected.Use(middleware.Auth(testJWTSecret))
 	protected.POST("/uploads/init", handler.Init)
+	protected.PUT("/uploads/:id/chunks/:number", handler.UploadChunk)
+	protected.GET("/uploads/:id", handler.GetStatus)
+	protected.POST("/uploads/:id/complete", handler.Complete)
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id": int64(1),
@@ -95,4 +99,220 @@ func TestHandlerInitUploadRejectsInvalidFileSize(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("init status = %d, want %d: %s", response.Code, http.StatusBadRequest, response.Body.String())
 	}
+}
+
+func TestHandlerUploadChunk(t *testing.T) {
+	router, token := newTestHandlerRouter(t)
+	task := initializeUpload(t, router, token)
+
+	request := newAuthenticatedRequest(
+		http.MethodPut,
+		"/uploads/"+task.ID+"/chunks/0",
+		bytes.NewReader([]byte("0123456789")),
+		token,
+	)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, want %d: %s", response.Code, http.StatusCreated, response.Body.String())
+	}
+
+	var result struct {
+		Chunk Chunk `json:"chunk"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode chunk response: %v", err)
+	}
+	if result.Chunk.Number != 0 || result.Chunk.Size != 10 {
+		t.Fatalf("chunk = %#v, want number 0 and size 10", result.Chunk)
+	}
+}
+
+func TestHandlerUploadChunkValidatesRequest(t *testing.T) {
+	router, token := newTestHandlerRouter(t)
+	task := initializeUpload(t, router, token)
+
+	testCases := []struct {
+		name   string
+		target string
+		body   string
+		want   int
+	}{
+		{
+			name:   "invalid number",
+			target: "/uploads/" + task.ID + "/chunks/not-a-number",
+			body:   "0123456789",
+			want:   http.StatusBadRequest,
+		},
+		{
+			name:   "missing task",
+			target: "/uploads/missing/chunks/0",
+			body:   "0123456789",
+			want:   http.StatusNotFound,
+		},
+		{
+			name:   "wrong chunk size",
+			target: "/uploads/" + task.ID + "/chunks/1",
+			body:   "short",
+			want:   http.StatusBadRequest,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := newAuthenticatedRequest(
+				http.MethodPut,
+				testCase.target,
+				bytes.NewReader([]byte(testCase.body)),
+				token,
+			)
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+
+			if response.Code != testCase.want {
+				t.Fatalf("status = %d, want %d: %s", response.Code, testCase.want, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestHandlerGetUploadStatus(t *testing.T) {
+	router, token := newTestHandlerRouter(t)
+	task := initializeUpload(t, router, token)
+
+	for _, chunk := range []struct {
+		number int
+		body   string
+	}{
+		{number: 1, body: "abcdefghij"},
+		{number: 0, body: "0123456789"},
+	} {
+		request := newAuthenticatedRequest(
+			http.MethodPut,
+			"/uploads/"+task.ID+"/chunks/"+strconv.Itoa(chunk.number),
+			bytes.NewReader([]byte(chunk.body)),
+			token,
+		)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("upload chunk %d status = %d, want %d: %s", chunk.number, response.Code, http.StatusCreated, response.Body.String())
+		}
+	}
+
+	request := newAuthenticatedRequest(http.MethodGet, "/uploads/"+task.ID, bytes.NewReader(nil), token)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status request = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+
+	var result UploadStatus
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode status response: %v", err)
+	}
+	if result.Upload.ID != task.ID || len(result.Chunks) != 2 {
+		t.Fatalf("status = %#v, want task with two chunks", result)
+	}
+	if result.Chunks[0].Number != 0 || result.Chunks[1].Number != 1 {
+		t.Fatalf("chunk order = %d, %d, want 0, 1", result.Chunks[0].Number, result.Chunks[1].Number)
+	}
+
+	missingRequest := newAuthenticatedRequest(http.MethodGet, "/uploads/missing", bytes.NewReader(nil), token)
+	missingResponse := httptest.NewRecorder()
+	router.ServeHTTP(missingResponse, missingRequest)
+	if missingResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d, want %d: %s", missingResponse.Code, http.StatusNotFound, missingResponse.Body.String())
+	}
+}
+
+func TestHandlerCompleteUpload(t *testing.T) {
+	router, token := newTestHandlerRouter(t)
+	task := initializeUpload(t, router, token)
+
+	for _, chunk := range []struct {
+		number int
+		body   string
+	}{
+		{number: 0, body: "0123456789"},
+		{number: 1, body: "abcdefghij"},
+		{number: 2, body: "12345"},
+	} {
+		request := newAuthenticatedRequest(
+			http.MethodPut,
+			"/uploads/"+task.ID+"/chunks/"+strconv.Itoa(chunk.number),
+			bytes.NewReader([]byte(chunk.body)),
+			token,
+		)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("upload chunk %d status = %d, want %d: %s", chunk.number, response.Code, http.StatusCreated, response.Body.String())
+		}
+	}
+
+	request := newAuthenticatedRequest(http.MethodPost, "/uploads/"+task.ID+"/complete", bytes.NewReader(nil), token)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("complete status = %d, want %d: %s", response.Code, http.StatusCreated, response.Body.String())
+	}
+
+	var result struct {
+		File struct {
+			ID   int64 `json:"id"`
+			Size int64 `json:"size"`
+		} `json:"file"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode complete response: %v", err)
+	}
+	if result.File.ID == 0 || result.File.Size != 25 {
+		t.Fatalf("file = %#v, want persisted file with size 25", result.File)
+	}
+}
+
+func TestHandlerCompleteUploadValidatesTask(t *testing.T) {
+	router, token := newTestHandlerRouter(t)
+
+	missingRequest := newAuthenticatedRequest(http.MethodPost, "/uploads/missing/complete", bytes.NewReader(nil), token)
+	missingResponse := httptest.NewRecorder()
+	router.ServeHTTP(missingResponse, missingRequest)
+	if missingResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing complete status = %d, want %d: %s", missingResponse.Code, http.StatusNotFound, missingResponse.Body.String())
+	}
+
+	task := initializeUpload(t, router, token)
+	incompleteRequest := newAuthenticatedRequest(http.MethodPost, "/uploads/"+task.ID+"/complete", bytes.NewReader(nil), token)
+	incompleteResponse := httptest.NewRecorder()
+	router.ServeHTTP(incompleteResponse, incompleteRequest)
+	if incompleteResponse.Code != http.StatusConflict {
+		t.Fatalf("incomplete complete status = %d, want %d: %s", incompleteResponse.Code, http.StatusConflict, incompleteResponse.Body.String())
+	}
+}
+
+func initializeUpload(t *testing.T, router *gin.Engine, token string) Task {
+	t.Helper()
+
+	requestBody := []byte(`{
+		"original_name":"video.mp4",
+		"content_type":"video/mp4",
+		"file_size":25,
+		"chunk_size":10
+	}`)
+	request := newAuthenticatedRequest(http.MethodPost, "/uploads/init", bytes.NewReader(requestBody), token)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("initialize upload status = %d, want %d: %s", response.Code, http.StatusCreated, response.Body.String())
+	}
+
+	var result struct {
+		Upload Task `json:"upload"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	return result.Upload
 }

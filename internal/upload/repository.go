@@ -5,7 +5,10 @@ import (
 	"errors"
 )
 
-var ErrTaskNotFound = errors.New("upload task not found")
+var (
+	ErrTaskNotFound  = errors.New("upload task not found")
+	ErrChunkNotFound = errors.New("upload chunk not found")
+)
 
 type Repository struct {
 	db *sql.DB
@@ -65,4 +68,101 @@ func (r *Repository) FindByID(userID int64, taskID string) (*Task, error) {
 	}
 
 	return &task, nil
+}
+
+func (r *Repository) UpsertChunk(chunk *Chunk) (*Chunk, error) {
+	_, err := r.db.Exec(
+		`INSERT INTO upload_chunks (upload_id, chunk_number, size, chunk_hash) VALUES (?, ?, ?, ?) ON CONFLICT(upload_id, chunk_number) DO UPDATE SET size = excluded.size, chunk_hash = excluded.chunk_hash`,
+		chunk.UploadID,
+		chunk.Number,
+		chunk.Size,
+		chunk.Hash,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return r.FindChunk(chunk.UploadID, chunk.Number)
+}
+
+func (r *Repository) FindChunk(uploadID string, chunkNumber int64) (*Chunk, error) {
+	var chunk Chunk
+
+	err := r.db.QueryRow(
+		`SELECT upload_id, chunk_number, size, chunk_hash, created_at FROM upload_chunks WHERE upload_id = ? AND chunk_number = ?`,
+		uploadID,
+		chunkNumber,
+	).Scan(
+		&chunk.UploadID,
+		&chunk.Number,
+		&chunk.Size,
+		&chunk.Hash,
+		&chunk.CreatedAt,
+	)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrChunkNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &chunk, nil
+}
+
+func (r *Repository) ListChunks(uploadID string) ([]Chunk, error) {
+	rows, err := r.db.Query(
+		`SELECT upload_id, chunk_number, size, chunk_hash, created_at FROM upload_chunks WHERE upload_id = ? ORDER BY chunk_number`,
+		uploadID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	chunks := make([]Chunk, 0)
+
+	for rows.Next() {
+		var chunk Chunk
+
+		if err := rows.Scan(
+			&chunk.UploadID,
+			&chunk.Number,
+			&chunk.Size,
+			&chunk.Hash,
+			&chunk.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+
+		chunks = append(chunks, chunk)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return chunks, nil
+}
+
+func (r *Repository) UpdateStatus(userID int64, taskID string, status string) error {
+	result, err := r.db.Exec(
+		`UPDATE upload_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`,
+		status,
+		taskID,
+		userID,
+	)
+	if err != nil {
+		return err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrTaskNotFound
+	}
+
+	return nil
 }
