@@ -196,14 +196,28 @@ func (s *Service) Complete(userID int64, taskID string) (*filemodule.UserFile, e
 		return nil, ErrTaskNotUploading
 	}
 
-	if err := s.repo.UpdateStatus(userID, taskID, StatusCompleting); err != nil {
+	transitioned, err := s.repo.TransitionStatus(
+		userID,
+		task.ID,
+		StatusUploading,
+		StatusCompleting,
+	)
+	if err != nil {
 		return nil, err
+	}
+	if !transitioned {
+		return nil, ErrTaskNotUploading
 	}
 
 	shouldRestoreStatus := true
 	defer func() {
 		if shouldRestoreStatus {
-			_ = s.repo.UpdateStatus(userID, taskID, StatusUploading)
+			_, _ = s.repo.TransitionStatus(
+				userID,
+				taskID,
+				StatusCompleting,
+				StatusUploading,
+			)
 		}
 	}()
 
@@ -238,8 +252,17 @@ func (s *Service) Complete(userID int64, taskID string) (*filemodule.UserFile, e
 		return nil, err
 	}
 
-	if err := s.repo.UpdateStatus(userID, taskID, StatusCompleted); err != nil {
+	completed, err := s.repo.TransitionStatus(
+		userID,
+		taskID,
+		StatusCompleting,
+		StatusCompleted,
+	)
+	if err != nil {
 		return nil, err
+	}
+	if !completed {
+		return nil, ErrTaskNotUploading
 	}
 
 	shouldRestoreStatus = false

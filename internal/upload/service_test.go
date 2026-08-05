@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	filemodule "github.com/SeanidHau/CloudBox/internal/file"
@@ -258,6 +259,60 @@ func TestServiceCompleteCreatesFileAndCleansTemporaryChunks(t *testing.T) {
 	}
 	if _, err := os.Stat(task.TempDir); !os.IsNotExist(err) {
 		t.Fatalf("temporary directory should be removed, stat error = %v", err)
+	}
+}
+
+func TestServiceCompleteAllowsOnlyOneConcurrentRequest(t *testing.T) {
+	service := newTestService(t)
+	task, err := service.Init(1, "video.mp4", "video/mp4", 25, 10, "")
+	if err != nil {
+		t.Fatalf("init upload: %v", err)
+	}
+	for number, content := range []string{"0123456789", "abcdefghij", "12345"} {
+		if _, err := service.UploadChunk(1, task.ID, int64(number), strings.NewReader(content)); err != nil {
+			t.Fatalf("upload chunk %d: %v", number, err)
+		}
+	}
+
+	results := make(chan error, 2)
+	var group sync.WaitGroup
+
+	for range 2 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			_, err := service.Complete(1, task.ID)
+			results <- err
+		}()
+	}
+
+	group.Wait()
+	close(results)
+
+	successes := 0
+	conflicts := 0
+	for err := range results {
+		if err == nil {
+			successes++
+			continue
+		}
+		if errors.Is(err, ErrTaskNotUploading) {
+			conflicts++
+			continue
+		}
+		t.Fatalf("complete error = %v, want success or conflict", err)
+	}
+
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("successes = %d, conflicts = %d, want 1 and 1", successes, conflicts)
+	}
+
+	files, err := filemodule.NewRepository(service.repo.db).ListActive(1)
+	if err != nil {
+		t.Fatalf("list active files: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("active file count = %d, want 1", len(files))
 	}
 }
 

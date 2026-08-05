@@ -145,24 +145,22 @@ func (r *Repository) ListChunks(uploadID string) ([]Chunk, error) {
 	return chunks, nil
 }
 
-func (r *Repository) UpdateStatus(userID int64, taskID string, status string) error {
+func (r *Repository) TransitionStatus(userID int64, taskID string, fromStatus string, toStatus string) (bool, error) {
 	result, err := r.db.Exec(
-		`UPDATE upload_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`,
-		status,
+		`UPDATE upload_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND status = ?`,
+		toStatus,
 		taskID,
 		userID,
-	)
+		fromStatus,
+		)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return ErrTaskNotFound
+		return false, err
 	}
 
-	return nil
+	return affected == 1, nil
 }

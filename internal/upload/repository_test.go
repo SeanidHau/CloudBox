@@ -156,7 +156,7 @@ func TestRepositoryUpsertAndListChunks(t *testing.T) {
 	}
 }
 
-func TestRepositoryUpdateStatus(t *testing.T) {
+func TestRepositoryTransitionStatus(t *testing.T) {
 	repo := newTestRepository(t)
 
 	if _, err := repo.Create(&Task{
@@ -173,8 +173,17 @@ func TestRepositoryUpdateStatus(t *testing.T) {
 		t.Fatalf("create upload task: %v", err)
 	}
 
-	if err := repo.UpdateStatus(1, "upload-1", StatusCompleting); err != nil {
-		t.Fatalf("update status: %v", err)
+	transitioned, err := repo.TransitionStatus(
+		1,
+		"upload-1",
+		StatusUploading,
+		StatusCompleting,
+	)
+	if err != nil {
+		t.Fatalf("transition status: %v", err)
+	}
+	if !transitioned {
+		t.Fatal("expected uploading to completing transition")
 	}
 
 	task, err := repo.FindByID(1, "upload-1")
@@ -185,7 +194,29 @@ func TestRepositoryUpdateStatus(t *testing.T) {
 		t.Fatalf("status = %q, want %q", task.Status, StatusCompleting)
 	}
 
-	if err := repo.UpdateStatus(2, "upload-1", StatusCompleted); !errors.Is(err, ErrTaskNotFound) {
-		t.Fatalf("other user update error = %v, want %v", err, ErrTaskNotFound)
+	transitioned, err = repo.TransitionStatus(
+		2,
+		"upload-1",
+		StatusCompleting,
+		StatusCompleted,
+	)
+	if err != nil {
+		t.Fatalf("other user transition: %v", err)
+	}
+	if transitioned {
+		t.Fatal("other user should not transition task status")
+	}
+
+	transitioned, err = repo.TransitionStatus(
+		1,
+		"upload-1",
+		StatusUploading,
+		StatusCompleted,
+	)
+	if err != nil {
+		t.Fatalf("wrong source status transition: %v", err)
+	}
+	if transitioned {
+		t.Fatal("transition with stale source status should fail")
 	}
 }
