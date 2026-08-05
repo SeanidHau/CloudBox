@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	filemodule "github.com/SeanidHau/CloudBox/internal/file"
 	"github.com/google/uuid"
@@ -168,7 +169,7 @@ func (s *Service) UploadChunk(
 	}
 
 	chunkHash := hex.EncodeToString(hasher.Sum(nil))
-	return s.repo.UpsertChunk(&Chunk{
+	chunk, err := s.repo.UpsertChunk(&Chunk{
 		UploadID: task.ID,
 		Number:   chunkNumber,
 		Size:     size,
@@ -177,6 +178,19 @@ func (s *Service) UploadChunk(
 			Valid:  true,
 		},
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	touched, err := s.repo.TouchUploading(userID, task.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !touched {
+		return nil, ErrTaskNotUploading
+	}
+
+	return chunk, nil
 }
 
 func expectedChunkSize(task *Task, chunkNumber int64) int64 {
@@ -291,6 +305,38 @@ func (s *Service) Cancel(userID int64, taskID string) error {
 	}
 
 	return os.RemoveAll(task.TempDir)
+}
+
+func (s *Service) CleanupExpired(before time.Time) (int, error) {
+	tasks, err := s.repo.ListExpiredUploading(before)
+	if err != nil {
+		return 0, err
+	}
+
+	cleaned := 0
+
+	for _, task := range tasks {
+		expired, err := s.repo.TransitionStatus(
+			task.UserID,
+			task.ID,
+			StatusUploading,
+			StatusFailed,
+		)
+		if err != nil {
+			return cleaned, err
+		}
+		if !expired {
+			continue
+		}
+
+		if err := os.RemoveAll(task.TempDir); err != nil {
+			return cleaned, err
+		}
+
+		cleaned++
+	}
+
+	return cleaned, nil
 }
 
 func mergeChunks(task *Task, chunks []Chunk) (string, string, error) {

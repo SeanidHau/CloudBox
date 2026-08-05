@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	filemodule "github.com/SeanidHau/CloudBox/internal/file"
 	"github.com/SeanidHau/CloudBox/internal/storage"
@@ -346,6 +347,56 @@ func TestServiceCancelMarksTaskFailedAndRemovesTemporaryFiles(t *testing.T) {
 	}
 	if err := service.Cancel(1, task.ID); !errors.Is(err, ErrTaskNotUploading) {
 		t.Fatalf("second cancel error = %v, want %v", err, ErrTaskNotUploading)
+	}
+}
+
+func TestServiceCleanupExpiredRemovesOnlyExpiredTasks(t *testing.T) {
+	service := newTestService(t)
+	expiredTask, err := service.Init(1, "expired.mp4", "video/mp4", 10, 10, "")
+	if err != nil {
+		t.Fatalf("init expired task: %v", err)
+	}
+	activeTask, err := service.Init(1, "active.mp4", "video/mp4", 10, 10, "")
+	if err != nil {
+		t.Fatalf("init active task: %v", err)
+	}
+
+	if _, err := service.repo.db.Exec(
+		`UPDATE upload_tasks SET updated_at = ? WHERE id = ?`,
+		sqliteTimestamp(time.Now().Add(-2*time.Hour)),
+		expiredTask.ID,
+	); err != nil {
+		t.Fatalf("age upload task: %v", err)
+	}
+
+	cleaned, err := service.CleanupExpired(time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("cleanup expired tasks: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("cleaned = %d, want 1", cleaned)
+	}
+
+	expired, err := service.repo.FindByID(1, expiredTask.ID)
+	if err != nil {
+		t.Fatalf("find expired task: %v", err)
+	}
+	if expired.Status != StatusFailed {
+		t.Fatalf("expired task status = %q, want %q", expired.Status, StatusFailed)
+	}
+	if _, err := os.Stat(expiredTask.TempDir); !os.IsNotExist(err) {
+		t.Fatalf("expired temp directory should be removed, stat error = %v", err)
+	}
+
+	active, err := service.repo.FindByID(1, activeTask.ID)
+	if err != nil {
+		t.Fatalf("find active task: %v", err)
+	}
+	if active.Status != StatusUploading {
+		t.Fatalf("active task status = %q, want %q", active.Status, StatusUploading)
+	}
+	if info, err := os.Stat(activeTask.TempDir); err != nil || !info.IsDir() {
+		t.Fatalf("active temp directory should remain: %v", err)
 	}
 }
 

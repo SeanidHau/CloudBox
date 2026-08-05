@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/SeanidHau/CloudBox/internal/auth"
 	"github.com/SeanidHau/CloudBox/internal/config"
@@ -63,6 +64,30 @@ func main() {
 		fileService,
 	)
 	uploadHandler := uploadmodule.NewHandler(uploadService)
+
+	cleanupExpiredUploads := func() {
+		before := time.Now().Add(-24 * time.Hour)
+
+		cleaned, err := uploadService.CleanupExpired(before)
+		if err != nil {
+			log.Printf("cleanup expired uploads: %v", err)
+			return
+		}
+		if cleaned > 0 {
+			log.Printf("cleanup %d expired uploads tasks", cleaned)
+		}
+	}
+
+	cleanupExpiredUploads()
+
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			cleanupExpiredUploads()
+		}
+	}()
 
 	protected := api.Group("")
 	protected.Use(middleware.Auth(cfg.JWTSecret))

@@ -3,6 +3,7 @@ package upload
 import (
 	"database/sql"
 	"errors"
+	"time"
 )
 
 var (
@@ -152,7 +153,7 @@ func (r *Repository) TransitionStatus(userID int64, taskID string, fromStatus st
 		taskID,
 		userID,
 		fromStatus,
-		)
+	)
 	if err != nil {
 		return false, err
 	}
@@ -163,4 +164,64 @@ func (r *Repository) TransitionStatus(userID int64, taskID string, fromStatus st
 	}
 
 	return affected == 1, nil
+}
+
+func (r *Repository) TouchUploading(userID int64, taskID string) (bool, error) {
+	result, err := r.db.Exec(
+		`UPDATE upload_tasks SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND status = ?`,
+		taskID,
+		userID,
+		StatusUploading,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+func (r *Repository) ListExpiredUploading(before time.Time) ([]Task, error) {
+	rows, err := r.db.Query(
+		`SELECT id, user_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir, created_at, updated_at FROM upload_tasks WHERE status = ? AND updated_at < ? ORDER BY updated_at`,
+		StatusUploading,
+		before.UTC().Format("2006-01-02 15:04:05"),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tasks := make([]Task, 0)
+
+	for rows.Next() {
+		var task Task
+		if err := rows.Scan(
+			&task.ID,
+			&task.UserID,
+			&task.OriginalName,
+			&task.ContentType,
+			&task.FileSize,
+			&task.ChunkSize,
+			&task.TotalChunks,
+			&task.FileHash,
+			&task.Status,
+			&task.TempDir,
+			&task.CreatedAt,
+			&task.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+
+		tasks = append(tasks, task)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return tasks, nil
 }

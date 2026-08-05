@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/SeanidHau/CloudBox/internal/database"
 )
@@ -38,6 +39,10 @@ func newTestRepository(t *testing.T) *Repository {
 	}
 
 	return NewRepository(db)
+}
+
+func sqliteTimestamp(value time.Time) string {
+	return value.UTC().Format("2006-01-02 15:04:05")
 }
 
 func TestRepositoryCreateAndFindUploadTask(t *testing.T) {
@@ -218,5 +223,68 @@ func TestRepositoryTransitionStatus(t *testing.T) {
 	}
 	if transitioned {
 		t.Fatal("transition with stale source status should fail")
+	}
+}
+
+func TestRepositoryTouchesAndListsExpiredUploadingTasks(t *testing.T) {
+	repo := newTestRepository(t)
+
+	if _, err := repo.Create(&Task{
+		ID:           "expired-upload",
+		UserID:       1,
+		OriginalName: "expired.mp4",
+		ContentType:  "video/mp4",
+		FileSize:     10,
+		ChunkSize:    10,
+		TotalChunks:  1,
+		Status:       StatusUploading,
+		TempDir:      "uploads/tmp/expired-upload",
+	}); err != nil {
+		t.Fatalf("create expired task: %v", err)
+	}
+	if _, err := repo.Create(&Task{
+		ID:           "active-upload",
+		UserID:       1,
+		OriginalName: "active.mp4",
+		ContentType:  "video/mp4",
+		FileSize:     10,
+		ChunkSize:    10,
+		TotalChunks:  1,
+		Status:       StatusUploading,
+		TempDir:      "uploads/tmp/active-upload",
+	}); err != nil {
+		t.Fatalf("create active task: %v", err)
+	}
+
+	if _, err := repo.db.Exec(
+		`UPDATE upload_tasks SET updated_at = ? WHERE id = ?`,
+		sqliteTimestamp(time.Now().Add(-2*time.Hour)),
+		"expired-upload",
+	); err != nil {
+		t.Fatalf("age upload task: %v", err)
+	}
+
+	expired, err := repo.ListExpiredUploading(time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("list expired tasks: %v", err)
+	}
+	if len(expired) != 1 || expired[0].ID != "expired-upload" {
+		t.Fatalf("expired tasks = %#v, want expired-upload", expired)
+	}
+
+	touched, err := repo.TouchUploading(1, "expired-upload")
+	if err != nil {
+		t.Fatalf("touch upload task: %v", err)
+	}
+	if !touched {
+		t.Fatal("expected active upload task to be touched")
+	}
+
+	expired, err = repo.ListExpiredUploading(time.Now().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("list expired tasks after touch: %v", err)
+	}
+	if len(expired) != 0 {
+		t.Fatalf("expired tasks after touch = %#v, want none", expired)
 	}
 }
