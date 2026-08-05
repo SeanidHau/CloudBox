@@ -148,3 +148,27 @@ func (h *Handler) Complete(c *gin.Context) {
 
 	c.JSON(http.StatusCreated, gin.H{"file": userFile})
 }
+
+func (h *Handler) Cancel(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	err := h.service.Cancel(userID, c.Param("id"))
+	if errors.Is(err, ErrTaskNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrTaskNotUploading) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to cancel upload"})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}

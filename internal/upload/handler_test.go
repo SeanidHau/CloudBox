@@ -29,6 +29,7 @@ func newTestHandlerRouter(t *testing.T) (*gin.Engine, string) {
 	protected.PUT("/uploads/:id/chunks/:number", handler.UploadChunk)
 	protected.GET("/uploads/:id", handler.GetStatus)
 	protected.POST("/uploads/:id/complete", handler.Complete)
+	protected.DELETE("/uploads/:id", handler.Cancel)
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id": int64(1),
@@ -289,6 +290,32 @@ func TestHandlerCompleteUploadValidatesTask(t *testing.T) {
 	router.ServeHTTP(incompleteResponse, incompleteRequest)
 	if incompleteResponse.Code != http.StatusConflict {
 		t.Fatalf("incomplete complete status = %d, want %d: %s", incompleteResponse.Code, http.StatusConflict, incompleteResponse.Body.String())
+	}
+}
+
+func TestHandlerCancelUpload(t *testing.T) {
+	router, token := newTestHandlerRouter(t)
+	task := initializeUpload(t, router, token)
+
+	request := newAuthenticatedRequest(http.MethodDelete, "/uploads/"+task.ID, bytes.NewReader(nil), token)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("cancel status = %d, want %d: %s", response.Code, http.StatusNoContent, response.Body.String())
+	}
+
+	repeatedRequest := newAuthenticatedRequest(http.MethodDelete, "/uploads/"+task.ID, bytes.NewReader(nil), token)
+	repeatedResponse := httptest.NewRecorder()
+	router.ServeHTTP(repeatedResponse, repeatedRequest)
+	if repeatedResponse.Code != http.StatusConflict {
+		t.Fatalf("repeated cancel status = %d, want %d: %s", repeatedResponse.Code, http.StatusConflict, repeatedResponse.Body.String())
+	}
+
+	missingRequest := newAuthenticatedRequest(http.MethodDelete, "/uploads/missing", bytes.NewReader(nil), token)
+	missingResponse := httptest.NewRecorder()
+	router.ServeHTTP(missingResponse, missingRequest)
+	if missingResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing cancel status = %d, want %d: %s", missingResponse.Code, http.StatusNotFound, missingResponse.Body.String())
 	}
 }
 

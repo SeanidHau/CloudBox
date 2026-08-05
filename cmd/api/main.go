@@ -90,6 +90,7 @@ func main() {
 	protected.PUT("/uploads/:id/chunks/:number", uploadHandler.UploadChunk)
 	protected.POST("/uploads/:id/complete", uploadHandler.Complete)
 	protected.GET("/uploads/:id", uploadHandler.GetStatus)
+	protected.DELETE("/uploads/:id", uploadHandler.Cancel)
 
 	if err := r.Run(cfg.HTTPAddr); err != nil {
 		log.Fatal(err)

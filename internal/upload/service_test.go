@@ -316,6 +316,39 @@ func TestServiceCompleteAllowsOnlyOneConcurrentRequest(t *testing.T) {
 	}
 }
 
+func TestServiceCancelMarksTaskFailedAndRemovesTemporaryFiles(t *testing.T) {
+	service := newTestService(t)
+	task, err := service.Init(1, "video.mp4", "video/mp4", 10, 10, "")
+	if err != nil {
+		t.Fatalf("init upload: %v", err)
+	}
+	if _, err := service.UploadChunk(1, task.ID, 0, strings.NewReader("0123456789")); err != nil {
+		t.Fatalf("upload chunk: %v", err)
+	}
+
+	if err := service.Cancel(1, task.ID); err != nil {
+		t.Fatalf("cancel upload: %v", err)
+	}
+
+	cancelledTask, err := service.repo.FindByID(1, task.ID)
+	if err != nil {
+		t.Fatalf("find cancelled task: %v", err)
+	}
+	if cancelledTask.Status != StatusFailed {
+		t.Fatalf("status = %q, want %q", cancelledTask.Status, StatusFailed)
+	}
+	if _, err := os.Stat(task.TempDir); !os.IsNotExist(err) {
+		t.Fatalf("temporary directory should be removed, stat error = %v", err)
+	}
+
+	if _, err := service.UploadChunk(1, task.ID, 0, strings.NewReader("0123456789")); !errors.Is(err, ErrTaskNotUploading) {
+		t.Fatalf("upload after cancel error = %v, want %v", err, ErrTaskNotUploading)
+	}
+	if err := service.Cancel(1, task.ID); !errors.Is(err, ErrTaskNotUploading) {
+		t.Fatalf("second cancel error = %v, want %v", err, ErrTaskNotUploading)
+	}
+}
+
 func TestServiceCompleteRequiresAllChunks(t *testing.T) {
 	service := newTestService(t)
 	task, err := service.Init(1, "video.mp4", "video/mp4", 25, 10, "")

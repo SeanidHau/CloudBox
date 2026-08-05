@@ -271,6 +271,28 @@ func (s *Service) Complete(userID int64, taskID string) (*filemodule.UserFile, e
 	return userFile, nil
 }
 
+func (s *Service) Cancel(userID int64, taskID string) error {
+	task, err := s.repo.FindByID(userID, taskID)
+	if err != nil {
+		return err
+	}
+
+	cancelled, err := s.repo.TransitionStatus(
+		userID,
+		task.ID,
+		StatusUploading,
+		StatusFailed,
+	)
+	if err != nil {
+		return err
+	}
+	if !cancelled {
+		return ErrTaskNotUploading
+	}
+
+	return os.RemoveAll(task.TempDir)
+}
+
 func mergeChunks(task *Task, chunks []Chunk) (string, string, error) {
 	if int64(len(chunks)) != task.TotalChunks {
 		return "", "", ErrChunksIncomplete
