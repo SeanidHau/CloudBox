@@ -39,6 +39,13 @@ func newTestFileRouter(t *testing.T) (*gin.Engine, string) {
 	protected.GET("/files/:id/download", handler.Download)
 	protected.DELETE("/files/:id", handler.SoftDelete)
 	protected.POST("/files/:id/restore", handler.Restore)
+	protected.PATCH("/files/:id/move", handler.MoveActive)
+	protected.PATCH("/files/:id/rename", handler.RenameActive)
+	protected.POST("/folders", handler.CreateFolder)
+	protected.GET("/folders", handler.ListFolders)
+	protected.PATCH("/folders/:id/rename", handler.RenameFolder)
+	protected.PATCH("/folders/:id/move", handler.MoveFolder)
+	protected.DELETE("/folders/:id", handler.DeleteFolder)
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id": int64(1),
@@ -256,6 +263,51 @@ func TestFileHandlerInstantUpload(t *testing.T) {
 		t.Fatalf("instant upload status = %d, want %d: %s", instantResponse.Code, http.StatusCreated, instantResponse.Body.String())
 	}
 
+	folderBody, err := json.Marshal(createFolderRequest{Name: "documents"})
+	if err != nil {
+		t.Fatalf("encode folder request: %v", err)
+	}
+	folderRequest := newAuthenticatedRequest(http.MethodPost, "/folders", bytes.NewReader(folderBody), token)
+	folderRequest.Header.Set("Content-Type", "application/json")
+	folderResponse := httptest.NewRecorder()
+	router.ServeHTTP(folderResponse, folderRequest)
+	if folderResponse.Code != http.StatusCreated {
+		t.Fatalf("create folder status = %d, want %d: %s", folderResponse.Code, http.StatusCreated, folderResponse.Body.String())
+	}
+
+	var folderResult struct {
+		Folder Folder `json:"folder"`
+	}
+	if err := json.Unmarshal(folderResponse.Body.Bytes(), &folderResult); err != nil {
+		t.Fatalf("decode folder response: %v", err)
+	}
+
+	instantInFolderBody, err := json.Marshal(instantUploadRequest{
+		ParentID:     &folderResult.Folder.ID,
+		OriginalName: "folder-copy.txt",
+		FileHash:     hex.EncodeToString(hash[:]),
+	})
+	if err != nil {
+		t.Fatalf("encode folder instant upload request: %v", err)
+	}
+	instantInFolderRequest := newAuthenticatedRequest(http.MethodPost, "/files/instant", bytes.NewReader(instantInFolderBody), token)
+	instantInFolderRequest.Header.Set("Content-Type", "application/json")
+	instantInFolderResponse := httptest.NewRecorder()
+	router.ServeHTTP(instantInFolderResponse, instantInFolderRequest)
+	if instantInFolderResponse.Code != http.StatusCreated {
+		t.Fatalf("folder instant upload status = %d, want %d: %s", instantInFolderResponse.Code, http.StatusCreated, instantInFolderResponse.Body.String())
+	}
+
+	var instantInFolderResult struct {
+		File UserFile `json:"file"`
+	}
+	if err := json.Unmarshal(instantInFolderResponse.Body.Bytes(), &instantInFolderResult); err != nil {
+		t.Fatalf("decode folder instant upload response: %v", err)
+	}
+	if instantInFolderResult.File.ParentID == nil || *instantInFolderResult.File.ParentID != folderResult.Folder.ID {
+		t.Fatalf("instant file parent ID = %v, want %d", instantInFolderResult.File.ParentID, folderResult.Folder.ID)
+	}
+
 	missingBody, err := json.Marshal(instantUploadRequest{
 		OriginalName: "missing.txt",
 		FileHash:     "missing-hash",
@@ -271,5 +323,650 @@ func TestFileHandlerInstantUpload(t *testing.T) {
 
 	if missingResponse.Code != http.StatusNotFound {
 		t.Fatalf("missing hash status = %d, want %d: %s", missingResponse.Code, http.StatusNotFound, missingResponse.Body.String())
+	}
+
+	missingFolderID := int64(999)
+	missingFolderBody, err := json.Marshal(instantUploadRequest{
+		ParentID:     &missingFolderID,
+		OriginalName: "missing-folder.txt",
+		FileHash:     hex.EncodeToString(hash[:]),
+	})
+	if err != nil {
+		t.Fatalf("encode missing folder instant upload request: %v", err)
+	}
+	missingFolderRequest := newAuthenticatedRequest(http.MethodPost, "/files/instant", bytes.NewReader(missingFolderBody), token)
+	missingFolderRequest.Header.Set("Content-Type", "application/json")
+	missingFolderResponse := httptest.NewRecorder()
+	router.ServeHTTP(missingFolderResponse, missingFolderRequest)
+	if missingFolderResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing folder status = %d, want %d: %s", missingFolderResponse.Code, http.StatusNotFound, missingFolderResponse.Body.String())
+	}
+}
+
+func TestFileHandlerFolderLifecycle(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	createFolder := func(requestBody createFolderRequest) (*Folder, int) {
+		body, err := json.Marshal(requestBody)
+		if err != nil {
+			t.Fatalf("encode folder request: %v", err)
+		}
+
+		request := newAuthenticatedRequest(http.MethodPost, "/folders", bytes.NewReader(body), token)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+
+		if response.Code != http.StatusCreated {
+			return nil, response.Code
+		}
+
+		var result struct {
+			Folder Folder `json:"folder"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatalf("decode folder response: %v", err)
+		}
+
+		return &result.Folder, response.Code
+	}
+
+	root, status := createFolder(createFolderRequest{Name: "documents"})
+	if status != http.StatusCreated || root.ParentID != nil {
+		t.Fatalf("root folder status = %d, folder = %#v", status, root)
+	}
+
+	child, status := createFolder(createFolderRequest{ParentID: &root.ID, Name: "photos"})
+	if status != http.StatusCreated || child.ParentID == nil || *child.ParentID != root.ID {
+		t.Fatalf("child folder status = %d, folder = %#v", status, child)
+	}
+
+	rootListRequest := newAuthenticatedRequest(http.MethodGet, "/folders", nil, token)
+	rootListResponse := httptest.NewRecorder()
+	router.ServeHTTP(rootListResponse, rootListRequest)
+	if rootListResponse.Code != http.StatusOK {
+		t.Fatalf("root list status = %d, want %d: %s", rootListResponse.Code, http.StatusOK, rootListResponse.Body.String())
+	}
+
+	var rootList struct {
+		Folders []Folder `json:"folders"`
+	}
+	if err := json.Unmarshal(rootListResponse.Body.Bytes(), &rootList); err != nil {
+		t.Fatalf("decode root folder list: %v", err)
+	}
+	if len(rootList.Folders) != 1 || rootList.Folders[0].ID != root.ID {
+		t.Fatalf("root folders = %#v, want documents", rootList.Folders)
+	}
+
+	childListRequest := newAuthenticatedRequest(http.MethodGet, "/folders?parent_id="+strconv.FormatInt(root.ID, 10), nil, token)
+	childListResponse := httptest.NewRecorder()
+	router.ServeHTTP(childListResponse, childListRequest)
+	if childListResponse.Code != http.StatusOK {
+		t.Fatalf("child list status = %d, want %d: %s", childListResponse.Code, http.StatusOK, childListResponse.Body.String())
+	}
+
+	var childList struct {
+		Folders []Folder `json:"folders"`
+	}
+	if err := json.Unmarshal(childListResponse.Body.Bytes(), &childList); err != nil {
+		t.Fatalf("decode child folder list: %v", err)
+	}
+	if len(childList.Folders) != 1 || childList.Folders[0].ID != child.ID {
+		t.Fatalf("child folders = %#v, want photos", childList.Folders)
+	}
+
+	_, duplicateStatus := createFolder(createFolderRequest{Name: "documents"})
+	if duplicateStatus != http.StatusConflict {
+		t.Fatalf("duplicate folder status = %d, want %d", duplicateStatus, http.StatusConflict)
+	}
+
+	_, emptyStatus := createFolder(createFolderRequest{Name: "   "})
+	if emptyStatus != http.StatusBadRequest {
+		t.Fatalf("empty folder status = %d, want %d", emptyStatus, http.StatusBadRequest)
+	}
+
+	invalidParentRequest := newAuthenticatedRequest(http.MethodGet, "/folders?parent_id=0", nil, token)
+	invalidParentResponse := httptest.NewRecorder()
+	router.ServeHTTP(invalidParentResponse, invalidParentRequest)
+	if invalidParentResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid parent status = %d, want %d", invalidParentResponse.Code, http.StatusBadRequest)
+	}
+
+	missingParentRequest := newAuthenticatedRequest(http.MethodGet, "/folders?parent_id=999", nil, token)
+	missingParentResponse := httptest.NewRecorder()
+	router.ServeHTTP(missingParentResponse, missingParentRequest)
+	if missingParentResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing parent status = %d, want %d", missingParentResponse.Code, http.StatusNotFound)
+	}
+}
+
+func TestFileHandlerUploadsIntoFolder(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	folderBody, err := json.Marshal(createFolderRequest{Name: "documents"})
+	if err != nil {
+		t.Fatalf("encode folder request: %v", err)
+	}
+	folderRequest := newAuthenticatedRequest(http.MethodPost, "/folders", bytes.NewReader(folderBody), token)
+	folderRequest.Header.Set("Content-Type", "application/json")
+	folderResponse := httptest.NewRecorder()
+	router.ServeHTTP(folderResponse, folderRequest)
+	if folderResponse.Code != http.StatusCreated {
+		t.Fatalf("create folder status = %d, want %d: %s", folderResponse.Code, http.StatusCreated, folderResponse.Body.String())
+	}
+
+	var folderResult struct {
+		Folder Folder `json:"folder"`
+	}
+	if err := json.Unmarshal(folderResponse.Body.Bytes(), &folderResult); err != nil {
+		t.Fatalf("decode folder response: %v", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("parent_id", strconv.FormatInt(folderResult.Folder.ID, 10)); err != nil {
+		t.Fatalf("write parent ID: %v", err)
+	}
+	part, err := writer.CreateFormFile("file", "report.txt")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := part.Write([]byte("folder content")); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	uploadRequest := newAuthenticatedRequest(http.MethodPost, "/files", &body, token)
+	uploadRequest.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadResponse := httptest.NewRecorder()
+	router.ServeHTTP(uploadResponse, uploadRequest)
+	if uploadResponse.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, want %d: %s", uploadResponse.Code, http.StatusCreated, uploadResponse.Body.String())
+	}
+
+	var uploadResult struct {
+		File UserFile `json:"file"`
+	}
+	if err := json.Unmarshal(uploadResponse.Body.Bytes(), &uploadResult); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+	if uploadResult.File.ParentID == nil || *uploadResult.File.ParentID != folderResult.Folder.ID {
+		t.Fatalf("file parent ID = %v, want %d", uploadResult.File.ParentID, folderResult.Folder.ID)
+	}
+
+	rootListRequest := newAuthenticatedRequest(http.MethodGet, "/files", nil, token)
+	rootListResponse := httptest.NewRecorder()
+	router.ServeHTTP(rootListResponse, rootListRequest)
+	if rootListResponse.Code != http.StatusOK {
+		t.Fatalf("root list status = %d, want %d", rootListResponse.Code, http.StatusOK)
+	}
+
+	var rootList struct {
+		Files []UserFile `json:"files"`
+	}
+	if err := json.Unmarshal(rootListResponse.Body.Bytes(), &rootList); err != nil {
+		t.Fatalf("decode root file list: %v", err)
+	}
+	if len(rootList.Files) != 0 {
+		t.Fatalf("root files = %#v, want no files", rootList.Files)
+	}
+
+	folderListRequest := newAuthenticatedRequest(
+		http.MethodGet,
+		"/files?parent_id="+strconv.FormatInt(folderResult.Folder.ID, 10),
+		nil,
+		token,
+	)
+	folderListResponse := httptest.NewRecorder()
+	router.ServeHTTP(folderListResponse, folderListRequest)
+	if folderListResponse.Code != http.StatusOK {
+		t.Fatalf("folder list status = %d, want %d", folderListResponse.Code, http.StatusOK)
+	}
+
+	var folderList struct {
+		Files []UserFile `json:"files"`
+	}
+	if err := json.Unmarshal(folderListResponse.Body.Bytes(), &folderList); err != nil {
+		t.Fatalf("decode folder file list: %v", err)
+	}
+	if len(folderList.Files) != 1 || folderList.Files[0].ID != uploadResult.File.ID {
+		t.Fatalf("folder files = %#v, want report.txt", folderList.Files)
+	}
+
+	invalidListRequest := newAuthenticatedRequest(http.MethodGet, "/files?parent_id=0", nil, token)
+	invalidListResponse := httptest.NewRecorder()
+	router.ServeHTTP(invalidListResponse, invalidListRequest)
+	if invalidListResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid list status = %d, want %d", invalidListResponse.Code, http.StatusBadRequest)
+	}
+
+	missingListRequest := newAuthenticatedRequest(http.MethodGet, "/files?parent_id=999", nil, token)
+	missingListResponse := httptest.NewRecorder()
+	router.ServeHTTP(missingListResponse, missingListRequest)
+	if missingListResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing folder list status = %d, want %d", missingListResponse.Code, http.StatusNotFound)
+	}
+
+	var invalidBody bytes.Buffer
+	invalidWriter := multipart.NewWriter(&invalidBody)
+	// 请求格式正确，但目录 ID 非法，验证处理器会在保存文件前拒绝它。
+	if err := invalidWriter.WriteField("parent_id", "0"); err != nil {
+		t.Fatalf("write invalid parent ID: %v", err)
+	}
+	invalidPart, err := invalidWriter.CreateFormFile("file", "invalid.txt")
+	if err != nil {
+		t.Fatalf("create invalid multipart file: %v", err)
+	}
+	if _, err := invalidPart.Write([]byte("invalid parent")); err != nil {
+		t.Fatalf("write invalid multipart file: %v", err)
+	}
+	if err := invalidWriter.Close(); err != nil {
+		t.Fatalf("close invalid multipart writer: %v", err)
+	}
+
+	invalidRequest := newAuthenticatedRequest(http.MethodPost, "/files", &invalidBody, token)
+	invalidRequest.Header.Set("Content-Type", invalidWriter.FormDataContentType())
+	invalidResponse := httptest.NewRecorder()
+	router.ServeHTTP(invalidResponse, invalidRequest)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid upload status = %d, want %d", invalidResponse.Code, http.StatusBadRequest)
+	}
+}
+
+func TestFileHandlerMovesActiveFile(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	folderBody, err := json.Marshal(createFolderRequest{Name: "documents"})
+	if err != nil {
+		t.Fatalf("encode folder request: %v", err)
+	}
+	folderRequest := newAuthenticatedRequest(http.MethodPost, "/folders", bytes.NewReader(folderBody), token)
+	folderRequest.Header.Set("Content-Type", "application/json")
+	folderResponse := httptest.NewRecorder()
+	router.ServeHTTP(folderResponse, folderRequest)
+	if folderResponse.Code != http.StatusCreated {
+		t.Fatalf("create folder status = %d, want %d: %s", folderResponse.Code, http.StatusCreated, folderResponse.Body.String())
+	}
+
+	var folderResult struct {
+		Folder Folder `json:"folder"`
+	}
+	if err := json.Unmarshal(folderResponse.Body.Bytes(), &folderResult); err != nil {
+		t.Fatalf("decode folder response: %v", err)
+	}
+
+	var uploadBody bytes.Buffer
+	writer := multipart.NewWriter(&uploadBody)
+	part, err := writer.CreateFormFile("file", "report.txt")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := part.Write([]byte("content")); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	uploadRequest := newAuthenticatedRequest(http.MethodPost, "/files", &uploadBody, token)
+	uploadRequest.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadResponse := httptest.NewRecorder()
+	router.ServeHTTP(uploadResponse, uploadRequest)
+	if uploadResponse.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, want %d: %s", uploadResponse.Code, http.StatusCreated, uploadResponse.Body.String())
+	}
+
+	var uploadResult struct {
+		File UserFile `json:"file"`
+	}
+	if err := json.Unmarshal(uploadResponse.Body.Bytes(), &uploadResult); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+
+	moveBody, err := json.Marshal(moveFileRequest{ParentID: &folderResult.Folder.ID})
+	if err != nil {
+		t.Fatalf("encode move request: %v", err)
+	}
+	moveRequest := newAuthenticatedRequest(http.MethodPatch, "/files/"+strconv.FormatInt(uploadResult.File.ID, 10)+"/move", bytes.NewReader(moveBody), token)
+	moveRequest.Header.Set("Content-Type", "application/json")
+	moveResponse := httptest.NewRecorder()
+	router.ServeHTTP(moveResponse, moveRequest)
+	if moveResponse.Code != http.StatusOK {
+		t.Fatalf("move status = %d, want %d: %s", moveResponse.Code, http.StatusOK, moveResponse.Body.String())
+	}
+
+	var moveResult struct {
+		File UserFile `json:"file"`
+	}
+	if err := json.Unmarshal(moveResponse.Body.Bytes(), &moveResult); err != nil {
+		t.Fatalf("decode move response: %v", err)
+	}
+	if moveResult.File.ParentID == nil || *moveResult.File.ParentID != folderResult.Folder.ID {
+		t.Fatalf("moved parent ID = %v, want %d", moveResult.File.ParentID, folderResult.Folder.ID)
+	}
+
+	rootRequest := newAuthenticatedRequest(http.MethodPatch, "/files/"+strconv.FormatInt(uploadResult.File.ID, 10)+"/move", bytes.NewReader([]byte(`{}`)), token)
+	rootRequest.Header.Set("Content-Type", "application/json")
+	rootResponse := httptest.NewRecorder()
+	router.ServeHTTP(rootResponse, rootRequest)
+	if rootResponse.Code != http.StatusOK {
+		t.Fatalf("move to root status = %d, want %d: %s", rootResponse.Code, http.StatusOK, rootResponse.Body.String())
+	}
+
+	invalidRequest := newAuthenticatedRequest(http.MethodPatch, "/files/"+strconv.FormatInt(uploadResult.File.ID, 10)+"/move", bytes.NewReader([]byte(`{"parent_id":0}`)), token)
+	invalidRequest.Header.Set("Content-Type", "application/json")
+	invalidResponse := httptest.NewRecorder()
+	router.ServeHTTP(invalidResponse, invalidRequest)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid parent status = %d, want %d", invalidResponse.Code, http.StatusBadRequest)
+	}
+
+	missingFolderRequest := newAuthenticatedRequest(http.MethodPatch, "/files/"+strconv.FormatInt(uploadResult.File.ID, 10)+"/move", bytes.NewReader([]byte(`{"parent_id":999}`)), token)
+	missingFolderRequest.Header.Set("Content-Type", "application/json")
+	missingFolderResponse := httptest.NewRecorder()
+	router.ServeHTTP(missingFolderResponse, missingFolderRequest)
+	if missingFolderResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing folder status = %d, want %d", missingFolderResponse.Code, http.StatusNotFound)
+	}
+
+	deleteRequest := newAuthenticatedRequest(http.MethodDelete, "/files/"+strconv.FormatInt(uploadResult.File.ID, 10), nil, token)
+	deleteResponse := httptest.NewRecorder()
+	router.ServeHTTP(deleteResponse, deleteRequest)
+	if deleteResponse.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want %d", deleteResponse.Code, http.StatusOK)
+	}
+
+	deletedMoveRequest := newAuthenticatedRequest(http.MethodPatch, "/files/"+strconv.FormatInt(uploadResult.File.ID, 10)+"/move", bytes.NewReader([]byte(`{}`)), token)
+	deletedMoveRequest.Header.Set("Content-Type", "application/json")
+	deletedMoveResponse := httptest.NewRecorder()
+	router.ServeHTTP(deletedMoveResponse, deletedMoveRequest)
+	if deletedMoveResponse.Code != http.StatusNotFound {
+		t.Fatalf("move deleted file status = %d, want %d", deletedMoveResponse.Code, http.StatusNotFound)
+	}
+}
+
+func TestFileHandlerRenamesActiveFile(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	var uploadBody bytes.Buffer
+	writer := multipart.NewWriter(&uploadBody)
+	part, err := writer.CreateFormFile("file", "draft.txt")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := part.Write([]byte("content")); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	uploadRequest := newAuthenticatedRequest(http.MethodPost, "/files", &uploadBody, token)
+	uploadRequest.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadResponse := httptest.NewRecorder()
+	router.ServeHTTP(uploadResponse, uploadRequest)
+	if uploadResponse.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, want %d: %s", uploadResponse.Code, http.StatusCreated, uploadResponse.Body.String())
+	}
+
+	var uploadResult struct {
+		File UserFile `json:"file"`
+	}
+	if err := json.Unmarshal(uploadResponse.Body.Bytes(), &uploadResult); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+
+	renameBody, err := json.Marshal(renameFileRequest{OriginalName: "final.txt"})
+	if err != nil {
+		t.Fatalf("encode rename request: %v", err)
+	}
+	renameRequest := newAuthenticatedRequest(http.MethodPatch, "/files/"+strconv.FormatInt(uploadResult.File.ID, 10)+"/rename", bytes.NewReader(renameBody), token)
+	renameRequest.Header.Set("Content-Type", "application/json")
+	renameResponse := httptest.NewRecorder()
+	router.ServeHTTP(renameResponse, renameRequest)
+	if renameResponse.Code != http.StatusOK {
+		t.Fatalf("rename status = %d, want %d: %s", renameResponse.Code, http.StatusOK, renameResponse.Body.String())
+	}
+
+	var renameResult struct {
+		File UserFile `json:"file"`
+	}
+	if err := json.Unmarshal(renameResponse.Body.Bytes(), &renameResult); err != nil {
+		t.Fatalf("decode rename response: %v", err)
+	}
+	if renameResult.File.OriginalName != "final.txt" {
+		t.Fatalf("renamed file = %#v, want final.txt", renameResult.File)
+	}
+	if renameResult.File.StoragePath != uploadResult.File.StoragePath {
+		t.Fatalf("storage path = %q, want unchanged %q", renameResult.File.StoragePath, uploadResult.File.StoragePath)
+	}
+
+	emptyRequest := newAuthenticatedRequest(http.MethodPatch, "/files/"+strconv.FormatInt(uploadResult.File.ID, 10)+"/rename", bytes.NewReader([]byte(`{"original_name":"   "}`)), token)
+	emptyRequest.Header.Set("Content-Type", "application/json")
+	emptyResponse := httptest.NewRecorder()
+	router.ServeHTTP(emptyResponse, emptyRequest)
+	if emptyResponse.Code != http.StatusBadRequest {
+		t.Fatalf("empty name status = %d, want %d", emptyResponse.Code, http.StatusBadRequest)
+	}
+
+	deleteRequest := newAuthenticatedRequest(http.MethodDelete, "/files/"+strconv.FormatInt(uploadResult.File.ID, 10), nil, token)
+	deleteResponse := httptest.NewRecorder()
+	router.ServeHTTP(deleteResponse, deleteRequest)
+	if deleteResponse.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, want %d", deleteResponse.Code, http.StatusOK)
+	}
+
+	deletedRequest := newAuthenticatedRequest(http.MethodPatch, "/files/"+strconv.FormatInt(uploadResult.File.ID, 10)+"/rename", bytes.NewReader(renameBody), token)
+	deletedRequest.Header.Set("Content-Type", "application/json")
+	deletedResponse := httptest.NewRecorder()
+	router.ServeHTTP(deletedResponse, deletedRequest)
+	if deletedResponse.Code != http.StatusNotFound {
+		t.Fatalf("rename deleted file status = %d, want %d", deletedResponse.Code, http.StatusNotFound)
+	}
+}
+
+func TestFileHandlerRenamesFolder(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	createFolder := func(name string) Folder {
+		body, err := json.Marshal(createFolderRequest{Name: name})
+		if err != nil {
+			t.Fatalf("encode folder request: %v", err)
+		}
+		request := newAuthenticatedRequest(http.MethodPost, "/folders", bytes.NewReader(body), token)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create folder status = %d, want %d: %s", response.Code, http.StatusCreated, response.Body.String())
+		}
+
+		var result struct {
+			Folder Folder `json:"folder"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatalf("decode folder response: %v", err)
+		}
+		return result.Folder
+	}
+
+	documents := createFolder("documents")
+	_ = createFolder("music")
+
+	renameBody, err := json.Marshal(renameFolderRequest{Name: "work"})
+	if err != nil {
+		t.Fatalf("encode rename request: %v", err)
+	}
+	renameRequest := newAuthenticatedRequest(http.MethodPatch, "/folders/"+strconv.FormatInt(documents.ID, 10)+"/rename", bytes.NewReader(renameBody), token)
+	renameRequest.Header.Set("Content-Type", "application/json")
+	renameResponse := httptest.NewRecorder()
+	router.ServeHTTP(renameResponse, renameRequest)
+	if renameResponse.Code != http.StatusOK {
+		t.Fatalf("rename status = %d, want %d: %s", renameResponse.Code, http.StatusOK, renameResponse.Body.String())
+	}
+
+	var renameResult struct {
+		Folder Folder `json:"folder"`
+	}
+	if err := json.Unmarshal(renameResponse.Body.Bytes(), &renameResult); err != nil {
+		t.Fatalf("decode rename response: %v", err)
+	}
+	if renameResult.Folder.Name != "work" {
+		t.Fatalf("renamed folder = %#v, want work", renameResult.Folder)
+	}
+
+	emptyRequest := newAuthenticatedRequest(http.MethodPatch, "/folders/"+strconv.FormatInt(documents.ID, 10)+"/rename", bytes.NewReader([]byte(`{"name":"   "}`)), token)
+	emptyRequest.Header.Set("Content-Type", "application/json")
+	emptyResponse := httptest.NewRecorder()
+	router.ServeHTTP(emptyResponse, emptyRequest)
+	if emptyResponse.Code != http.StatusBadRequest {
+		t.Fatalf("empty name status = %d, want %d", emptyResponse.Code, http.StatusBadRequest)
+	}
+
+	duplicateRequest := newAuthenticatedRequest(http.MethodPatch, "/folders/"+strconv.FormatInt(documents.ID, 10)+"/rename", bytes.NewReader([]byte(`{"name":"music"}`)), token)
+	duplicateRequest.Header.Set("Content-Type", "application/json")
+	duplicateResponse := httptest.NewRecorder()
+	router.ServeHTTP(duplicateResponse, duplicateRequest)
+	if duplicateResponse.Code != http.StatusConflict {
+		t.Fatalf("duplicate name status = %d, want %d", duplicateResponse.Code, http.StatusConflict)
+	}
+
+	missingRequest := newAuthenticatedRequest(http.MethodPatch, "/folders/999/rename", bytes.NewReader(renameBody), token)
+	missingRequest.Header.Set("Content-Type", "application/json")
+	missingResponse := httptest.NewRecorder()
+	router.ServeHTTP(missingResponse, missingRequest)
+	if missingResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing folder status = %d, want %d", missingResponse.Code, http.StatusNotFound)
+	}
+}
+
+func TestFileHandlerMovesFolder(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	createFolder := func(parentID *int64, name string) Folder {
+		body, err := json.Marshal(createFolderRequest{ParentID: parentID, Name: name})
+		if err != nil {
+			t.Fatalf("encode folder request: %v", err)
+		}
+		request := newAuthenticatedRequest(http.MethodPost, "/folders", bytes.NewReader(body), token)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create folder status = %d, want %d: %s", response.Code, http.StatusCreated, response.Body.String())
+		}
+
+		var result struct {
+			Folder Folder `json:"folder"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatalf("decode folder response: %v", err)
+		}
+		return result.Folder
+	}
+
+	documents := createFolder(nil, "documents")
+	photos := createFolder(&documents.ID, "photos")
+	archive := createFolder(nil, "archive")
+
+	moveBody, err := json.Marshal(moveFolderRequest{ParentID: &archive.ID})
+	if err != nil {
+		t.Fatalf("encode move request: %v", err)
+	}
+	moveRequest := newAuthenticatedRequest(http.MethodPatch, "/folders/"+strconv.FormatInt(documents.ID, 10)+"/move", bytes.NewReader(moveBody), token)
+	moveRequest.Header.Set("Content-Type", "application/json")
+	moveResponse := httptest.NewRecorder()
+	router.ServeHTTP(moveResponse, moveRequest)
+	if moveResponse.Code != http.StatusOK {
+		t.Fatalf("move status = %d, want %d: %s", moveResponse.Code, http.StatusOK, moveResponse.Body.String())
+	}
+
+	var moveResult struct {
+		Folder Folder `json:"folder"`
+	}
+	if err := json.Unmarshal(moveResponse.Body.Bytes(), &moveResult); err != nil {
+		t.Fatalf("decode move response: %v", err)
+	}
+	if moveResult.Folder.ParentID == nil || *moveResult.Folder.ParentID != archive.ID {
+		t.Fatalf("moved parent ID = %v, want %d", moveResult.Folder.ParentID, archive.ID)
+	}
+
+	cycleBody, err := json.Marshal(moveFolderRequest{ParentID: &photos.ID})
+	if err != nil {
+		t.Fatalf("encode cycle request: %v", err)
+	}
+	cycleRequest := newAuthenticatedRequest(http.MethodPatch, "/folders/"+strconv.FormatInt(documents.ID, 10)+"/move", bytes.NewReader(cycleBody), token)
+	cycleRequest.Header.Set("Content-Type", "application/json")
+	cycleResponse := httptest.NewRecorder()
+	router.ServeHTTP(cycleResponse, cycleRequest)
+	if cycleResponse.Code != http.StatusConflict {
+		t.Fatalf("cycle move status = %d, want %d: %s", cycleResponse.Code, http.StatusConflict, cycleResponse.Body.String())
+	}
+
+	invalidRequest := newAuthenticatedRequest(http.MethodPatch, "/folders/"+strconv.FormatInt(documents.ID, 10)+"/move", bytes.NewReader([]byte(`{"parent_id":0}`)), token)
+	invalidRequest.Header.Set("Content-Type", "application/json")
+	invalidResponse := httptest.NewRecorder()
+	router.ServeHTTP(invalidResponse, invalidRequest)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid parent status = %d, want %d", invalidResponse.Code, http.StatusBadRequest)
+	}
+}
+
+func TestFileHandlerDeletesFolder(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	createFolder := func(parentID *int64, name string) Folder {
+		body, err := json.Marshal(createFolderRequest{ParentID: parentID, Name: name})
+		if err != nil {
+			t.Fatalf("encode folder request: %v", err)
+		}
+		request := newAuthenticatedRequest(http.MethodPost, "/folders", bytes.NewReader(body), token)
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create folder status = %d, want %d: %s", response.Code, http.StatusCreated, response.Body.String())
+		}
+
+		var result struct {
+			Folder Folder `json:"folder"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatalf("decode folder response: %v", err)
+		}
+		return result.Folder
+	}
+
+	empty := createFolder(nil, "empty")
+	deleteRequest := newAuthenticatedRequest(http.MethodDelete, "/folders/"+strconv.FormatInt(empty.ID, 10), nil, token)
+	deleteResponse := httptest.NewRecorder()
+	router.ServeHTTP(deleteResponse, deleteRequest)
+	if deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want %d: %s", deleteResponse.Code, http.StatusNoContent, deleteResponse.Body.String())
+	}
+
+	missingRequest := newAuthenticatedRequest(http.MethodDelete, "/folders/"+strconv.FormatInt(empty.ID, 10), nil, token)
+	missingResponse := httptest.NewRecorder()
+	router.ServeHTTP(missingResponse, missingRequest)
+	if missingResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing folder status = %d, want %d", missingResponse.Code, http.StatusNotFound)
+	}
+
+	parent := createFolder(nil, "parent")
+	_ = createFolder(&parent.ID, "child")
+	nonEmptyRequest := newAuthenticatedRequest(http.MethodDelete, "/folders/"+strconv.FormatInt(parent.ID, 10), nil, token)
+	nonEmptyResponse := httptest.NewRecorder()
+	router.ServeHTTP(nonEmptyResponse, nonEmptyRequest)
+	if nonEmptyResponse.Code != http.StatusConflict {
+		t.Fatalf("non-empty folder status = %d, want %d: %s", nonEmptyResponse.Code, http.StatusConflict, nonEmptyResponse.Body.String())
+	}
+
+	invalidRequest := newAuthenticatedRequest(http.MethodDelete, "/folders/0", nil, token)
+	invalidResponse := httptest.NewRecorder()
+	router.ServeHTTP(invalidResponse, invalidRequest)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid folder status = %d, want %d", invalidResponse.Code, http.StatusBadRequest)
 	}
 }

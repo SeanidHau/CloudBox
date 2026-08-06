@@ -13,6 +13,7 @@ const (
 type UserFile struct {
 	ID           int64        `json:"id"`
 	UserID       int64        `json:"user_id"`
+	ParentID     *int64       `json:"parent_id"`
 	OriginalName string       `json:"original_name"`
 	StoragePath  string       `json:"storage_path"`
 	Size         int64        `json:"size"`
@@ -20,6 +21,15 @@ type UserFile struct {
 	Status       string       `json:"status"`
 	CreatedAt    time.Time    `json:"created_at"`
 	DeletedAt    sql.NullTime `json:"-"`
+}
+
+type Folder struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	ParentID  *int64    `json:"parent_id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type FileObject struct {

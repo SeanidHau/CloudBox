@@ -19,12 +19,15 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] 条件状态转换，避免并发完成请求重复创建用户文件
 - [x] 取消未完成上传并清理临时分片
 - [x] 服务启动时和每小时自动清理过期上传任务
+- [x] 文件夹树：创建、浏览、重命名、移动和仅删除空目录
+- [x] 文件重命名与移动，支持根目录和嵌套目录
+- [x] 小文件上传、秒传和分片上传均可指定目标文件夹
 - [x] Repository、Service 和 HTTP Handler 的自动化测试
 - [x] 真实 HTTP 端到端验证：初始化、三块上传、合并、下载校验
 
 ### 未完成
 
-- [ ] 文件夹、重命名、移动和存储配额
+- [ ] 存储配额
 - [ ] 分享链接、密码、过期时间和下载次数限制
 - [ ] PostgreSQL、MinIO 和 Redis 的生产化替换
 - [ ] 异步任务，例如缩略图、病毒扫描和失败重试
@@ -101,11 +104,18 @@ Authorization: Bearer <JWT>
 | 登录 | `POST /api/auth/login` |
 | 上传小文件 | `POST /api/files` |
 | 秒传 | `POST /api/files/instant` |
-| 活跃文件列表 | `GET /api/files` |
+| 活跃文件列表 | `GET /api/files`，可选 `?parent_id=<目录 ID>` |
 | 回收站 | `GET /api/files/trash` |
 | 下载或 Range 下载 | `GET /api/files/:id/download` |
 | 软删除 | `DELETE /api/files/:id` |
 | 恢复文件 | `POST /api/files/:id/restore` |
+| 移动文件 | `PATCH /api/files/:id/move` |
+| 重命名文件 | `PATCH /api/files/:id/rename` |
+| 创建文件夹 | `POST /api/folders` |
+| 浏览文件夹 | `GET /api/folders`，可选 `?parent_id=<目录 ID>` |
+| 重命名文件夹 | `PATCH /api/folders/:id/rename` |
+| 移动文件夹 | `PATCH /api/folders/:id/move` |
+| 删除空文件夹 | `DELETE /api/folders/:id` |
 | 初始化分片上传 | `POST /api/uploads/init` |
 | 上传一个分片 | `PUT /api/uploads/:id/chunks/:number` |
 | 查询上传状态 | `GET /api/uploads/:id` |
@@ -114,7 +124,7 @@ Authorization: Bearer <JWT>
 ## 分片上传流程
 
 ```text
-客户端声明文件大小和分片大小
+客户端声明文件大小、分片大小和可选目标文件夹
     |
 POST /api/uploads/init
     |
@@ -132,6 +142,7 @@ POST /api/uploads/:id/complete
 ```
 
 分片编号从 `0` 开始。最后一块可以小于普通分片大小；其他分片必须与初始化时声明的大小一致。
+`parent_id` 可选；未传时文件位于根目录。所有目录操作均按当前 JWT 用户隔离，不能访问其他用户的目录。
 
 ## 最小使用示例
 

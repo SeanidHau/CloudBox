@@ -27,6 +27,8 @@ func newTestRepository(t *testing.T) *Repository {
 		"../../migrations/002_file_objects.sql",
 		"../../migrations/003_upload_tasks.sql",
 		"../../migrations/004_fix_upload_chunks.sql",
+		"../../migrations/005_folders.sql",
+		"../../migrations/006_upload_task_parent.sql",
 	); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
@@ -48,9 +50,15 @@ func sqliteTimestamp(value time.Time) string {
 func TestRepositoryCreateAndFindUploadTask(t *testing.T) {
 	repo := newTestRepository(t)
 
+	if _, err := repo.db.Exec(`INSERT INTO folders (id, user_id, name) VALUES (1, 1, 'documents')`); err != nil {
+		t.Fatalf("create folder: %v", err)
+	}
+	parentID := int64(1)
+
 	created, err := repo.Create(&Task{
 		ID:           "upload-1",
 		UserID:       1,
+		ParentID:     &parentID,
 		OriginalName: "video.mp4",
 		ContentType:  "video/mp4",
 		FileSize:     25,
@@ -72,6 +80,9 @@ func TestRepositoryCreateAndFindUploadTask(t *testing.T) {
 	if created.TotalChunks != 3 {
 		t.Fatalf("total chunks = %d, want 3", created.TotalChunks)
 	}
+	if created.ParentID == nil || *created.ParentID != parentID {
+		t.Fatalf("parent ID = %v, want %d", created.ParentID, parentID)
+	}
 	if !created.FileHash.Valid || created.FileHash.String != "file-hash" {
 		t.Fatalf("file hash = %#v, want file-hash", created.FileHash)
 	}
@@ -85,6 +96,9 @@ func TestRepositoryCreateAndFindUploadTask(t *testing.T) {
 	}
 	if found.TempDir != "uploads/tmp/upload-1" {
 		t.Fatalf("temp dir = %q, want %q", found.TempDir, "uploads/tmp/upload-1")
+	}
+	if found.ParentID == nil || *found.ParentID != parentID {
+		t.Fatalf("found parent ID = %v, want %d", found.ParentID, parentID)
 	}
 
 	if _, err := repo.FindByID(2, "upload-1"); !errors.Is(err, ErrTaskNotFound) {

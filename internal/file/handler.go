@@ -13,9 +13,31 @@ type Handler struct {
 	service *Service
 }
 
+type createFolderRequest struct {
+	ParentID *int64 `json:"parent_id"`
+	Name     string `json:"name"`
+}
+
+type moveFileRequest struct {
+	ParentID *int64 `json:"parent_id"`
+}
+
 type instantUploadRequest struct {
+	ParentID     *int64 `json:"parent_id"`
 	OriginalName string `json:"original_name"`
 	FileHash     string `json:"file_hash"`
+}
+
+type renameFileRequest struct {
+	OriginalName string `json:"original_name"`
+}
+
+type renameFolderRequest struct {
+	Name string `json:"name"`
+}
+
+type moveFolderRequest struct {
+	ParentID *int64 `json:"parent_id"`
 }
 
 func NewHandler(service *Service) *Handler {
@@ -49,9 +71,31 @@ func (h *Handler) Upload(c *gin.Context) {
 		contentType = "application/octet-stream"
 	}
 
-	savedFile, err := h.service.Upload(userID, header.Filename, contentType, src)
+	var parentID *int64
+
+	if value := c.PostForm("parent_id"); value != "" {
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid parent id"})
+			return
+		}
+
+		parentID = &id
+	}
+
+	savedFile, err := h.service.UploadIntoFolder(
+		userID,
+		parentID,
+		header.Filename,
+		contentType,
+		src,
+	)
 	if errors.Is(err, ErrOriginalNameRequired) || errors.Is(err, ErrContentRequired) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFolderNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -72,9 +116,25 @@ func (h *Handler) ListActive(c *gin.Context) {
 		return
 	}
 
-	files, err := h.service.ListActive(userID)
+	var parentID *int64
+
+	if value, exists := c.GetQuery("parent_id"); exists {
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid parent id"})
+			return
+		}
+
+		parentID = &id
+	}
+
+	files, err := h.service.ListActiveInFolder(userID, parentID)
+	if errors.Is(err, ErrFolderNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list files"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list active files"})
 		return
 	}
 
@@ -206,9 +266,18 @@ func (h *Handler) InstantUpload(c *gin.Context) {
 		return
 	}
 
-	savedFile, err := h.service.InstantUpload(userID, req.OriginalName, req.FileHash)
+	savedFile, err := h.service.InstantUploadIntoFolder(
+		userID,
+		req.ParentID,
+		req.OriginalName,
+		req.FileHash,
+	)
 	if errors.Is(err, ErrOriginalNameRequired) || errors.Is(err, ErrFileHashRequired) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFolderNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
 	if errors.Is(err, ErrFileObjectNotFound) {
@@ -223,4 +292,264 @@ func (h *Handler) InstantUpload(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"file": savedFile,
 	})
+}
+
+func (h *Handler) CreateFolder(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	var req createFolderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+
+	folder, err := h.service.CreateFolder(userID, req.ParentID, req.Name)
+	if errors.Is(err, ErrFolderNameRequired) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFolderNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFolderAlreadyExists) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create folder"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"folder": folder})
+}
+
+func (h *Handler) ListFolders(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	var parentID *int64
+
+	if value, exists := c.GetQuery("parent_id"); exists {
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid parent id"})
+			return
+		}
+
+		parentID = &id
+	}
+
+	folders, err := h.service.ListFolders(userID, parentID)
+	if errors.Is(err, ErrFolderNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list folders"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"folders": folders})
+}
+
+func (h *Handler) MoveActive(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	fileID, err := parseFileID(c)
+	if err != nil || fileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	var req moveFileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+	if req.ParentID != nil && *req.ParentID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid parent id"})
+		return
+	}
+
+	movedFile, err := h.service.MoveActive(userID, fileID, req.ParentID)
+	if errors.Is(err, ErrFileNotFound) || errors.Is(err, ErrFolderNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to move file"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"file": movedFile,
+	})
+}
+
+func (h *Handler) RenameActive(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	fileID, err := parseFileID(c)
+	if err != nil || fileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	var req renameFileRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+
+	renamedFile, err := h.service.RenameActive(
+		userID,
+		fileID,
+		req.OriginalName,
+	)
+	if errors.Is(err, ErrOriginalNameRequired) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFileNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rename file"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"file": renamedFile,
+	})
+}
+
+func (h *Handler) RenameFolder(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	folderID, err := parseFileID(c)
+	if err != nil || folderID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder id"})
+		return
+	}
+
+	var req renameFolderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+
+	folder, err := h.service.RenameFolder(userID, folderID, req.Name)
+	if errors.Is(err, ErrFolderNameRequired) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFolderNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFolderAlreadyExists) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rename folder"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"folder": folder,
+	})
+}
+
+func (h *Handler) MoveFolder(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	folderID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || folderID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder id"})
+		return
+	}
+
+	var req moveFolderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+	if req.ParentID != nil && *req.ParentID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid parent id"})
+		return
+	}
+
+	folder, err := h.service.MoveFolder(userID, folderID, req.ParentID)
+	if errors.Is(err, ErrFolderNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFolderAlreadyExists) || errors.Is(err, ErrFolderMoveCycle) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to move folder"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"folder": folder,
+	})
+}
+
+func (h *Handler) DeleteFolder(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	folderID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || folderID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid folder id"})
+		return
+	}
+
+	err = h.service.DeleteFolder(userID, folderID)
+	if errors.Is(err, ErrFolderNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFolderNotEmpty) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete folder"})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
 }

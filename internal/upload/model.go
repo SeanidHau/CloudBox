@@ -15,6 +15,7 @@ const (
 type Task struct {
 	ID           string         `json:"id"`
 	UserID       int64          `json:"user_id"`
+	ParentID     *int64         `json:"parent_id"`
 	OriginalName string         `json:"original_name"`
 	ContentType  string         `json:"content_type"`
 	FileSize     int64          `json:"file_size"`

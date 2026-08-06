@@ -29,9 +29,12 @@ var (
 	ErrFileHashMismatch     = errors.New("file hash does not match uploaded content")
 )
 
-type FileUploader interface {
-	Upload(
-		UserId int64,
+type FileService interface {
+	ValidateFolder(userID int64, parentID *int64) error
+
+	UploadIntoFolder(
+		userID int64,
+		parentID *int64,
 		originalName string,
 		contentType string,
 		reader io.Reader,
@@ -39,25 +42,45 @@ type FileUploader interface {
 }
 
 type Service struct {
-	repo         *Repository
-	tempBaseDir  string
-	fileUploader FileUploader
+	repo        *Repository
+	tempBaseDir string
+	fileService FileService
 }
 
 func NewService(
 	repo *Repository,
 	tempBaseDir string,
-	uploader FileUploader,
+	fileService FileService,
 ) *Service {
 	return &Service{
-		repo:         repo,
-		tempBaseDir:  tempBaseDir,
-		fileUploader: uploader,
+		repo:        repo,
+		tempBaseDir: tempBaseDir,
+		fileService: fileService,
 	}
 }
 
 func (s *Service) Init(
 	userID int64,
+	originalName string,
+	contentType string,
+	fileSize int64,
+	chunkSize int64,
+	fileHash string,
+) (*Task, error) {
+	return s.InitInFolder(
+		userID,
+		nil,
+		originalName,
+		contentType,
+		fileSize,
+		chunkSize,
+		fileHash,
+	)
+}
+
+func (s *Service) InitInFolder(
+	userID int64,
+	parentID *int64,
 	originalName string,
 	contentType string,
 	fileSize int64,
@@ -81,10 +104,15 @@ func (s *Service) Init(
 		contentType = "application/octet-stream"
 	}
 
+	if err := s.fileService.ValidateFolder(userID, parentID); err != nil {
+		return nil, err
+	}
+
 	taskID := uuid.NewString()
 	task := &Task{
 		ID:           taskID,
 		UserID:       userID,
+		ParentID:     parentID,
 		OriginalName: originalName,
 		ContentType:  contentType,
 		FileSize:     fileSize,
@@ -256,8 +284,9 @@ func (s *Service) Complete(userID int64, taskID string) (*filemodule.UserFile, e
 	}
 	defer mergedFile.Close()
 
-	userFile, err := s.fileUploader.Upload(
+	userFile, err := s.fileService.UploadIntoFolder(
 		userID,
+		task.ParentID,
 		task.OriginalName,
 		task.ContentType,
 		mergedFile,

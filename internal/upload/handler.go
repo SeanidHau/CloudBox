@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
+	filemodule "github.com/SeanidHau/CloudBox/internal/file"
 	"github.com/SeanidHau/CloudBox/internal/middleware"
 	"github.com/gin-gonic/gin"
 )
@@ -13,6 +14,7 @@ type Handler struct {
 	service *Service
 }
 type initRequest struct {
+	ParentID     *int64 `json:"parent_id"`
 	OriginalName string `json:"original_name"`
 	ContentType  string `json:"content_type"`
 	FileSize     int64  `json:"file_size"`
@@ -37,8 +39,14 @@ func (h *Handler) Init(c *gin.Context) {
 		return
 	}
 
-	task, err := h.service.Init(
+	if req.ParentID != nil && *req.ParentID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid parent id"})
+		return
+	}
+
+	task, err := h.service.InitInFolder(
 		userID,
+		req.ParentID,
 		req.OriginalName,
 		req.ContentType,
 		req.FileSize,
@@ -49,6 +57,10 @@ func (h *Handler) Init(c *gin.Context) {
 		errors.Is(err, ErrFileSizeInvalid) ||
 		errors.Is(err, ErrChunkSizeInvalid) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, filemodule.ErrFolderNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
 	if err != nil {

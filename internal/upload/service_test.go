@@ -88,6 +88,59 @@ func TestServiceInitValidatesInput(t *testing.T) {
 	}
 }
 
+func TestServiceCompletesUploadIntoFolder(t *testing.T) {
+	service := newTestService(t)
+	folderRepo := filemodule.NewRepository(service.repo.db)
+	folder, err := folderRepo.CreateFolder(1, nil, "videos")
+	if err != nil {
+		t.Fatalf("create folder: %v", err)
+	}
+
+	task, err := service.InitInFolder(
+		1,
+		&folder.ID,
+		"video.mp4",
+		"video/mp4",
+		10,
+		10,
+		"",
+	)
+	if err != nil {
+		t.Fatalf("initialize upload in folder: %v", err)
+	}
+	if task.ParentID == nil || *task.ParentID != folder.ID {
+		t.Fatalf("task parent ID = %v, want %d", task.ParentID, folder.ID)
+	}
+
+	if _, err := service.UploadChunk(1, task.ID, 0, strings.NewReader("0123456789")); err != nil {
+		t.Fatalf("upload chunk: %v", err)
+	}
+
+	completed, err := service.Complete(1, task.ID)
+	if err != nil {
+		t.Fatalf("complete upload: %v", err)
+	}
+	if completed.ParentID == nil || *completed.ParentID != folder.ID {
+		t.Fatalf("completed file parent ID = %v, want %d", completed.ParentID, folder.ID)
+	}
+
+	otherFolder, err := folderRepo.CreateFolder(2, nil, "private")
+	if err != nil {
+		t.Fatalf("create other user folder: %v", err)
+	}
+	if _, err := service.InitInFolder(1, &otherFolder.ID, "forbidden.mp4", "video/mp4", 10, 10, ""); !errors.Is(err, filemodule.ErrFolderNotFound) {
+		t.Fatalf("other user folder error = %v, want %v", err, filemodule.ErrFolderNotFound)
+	}
+
+	var taskCount int
+	if err := service.repo.db.QueryRow(`SELECT COUNT(*) FROM upload_tasks WHERE user_id = 1`).Scan(&taskCount); err != nil {
+		t.Fatalf("count upload tasks: %v", err)
+	}
+	if taskCount != 1 {
+		t.Fatalf("task count = %d, want 1", taskCount)
+	}
+}
+
 func TestServiceUploadChunk(t *testing.T) {
 	service := newTestService(t)
 	task, err := service.Init(1, "video.mp4", "video/mp4", 25, 10, "")
@@ -453,8 +506,13 @@ type statusCheckingUploader struct {
 	observedStatus string
 }
 
-func (u *statusCheckingUploader) Upload(
+func (u *statusCheckingUploader) ValidateFolder(userID int64, parentID *int64) error {
+	return nil
+}
+
+func (u *statusCheckingUploader) UploadIntoFolder(
 	userID int64,
+	parentID *int64,
 	originalName string,
 	contentType string,
 	reader io.Reader,
@@ -467,6 +525,7 @@ func (u *statusCheckingUploader) Upload(
 
 	return &filemodule.UserFile{
 		UserID:       userID,
+		ParentID:     parentID,
 		OriginalName: originalName,
 		ContentType:  contentType,
 	}, nil

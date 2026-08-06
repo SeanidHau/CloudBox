@@ -31,6 +31,8 @@ func main() {
 		"migrations/002_file_objects.sql",
 		"migrations/003_upload_tasks.sql",
 		"migrations/004_fix_upload_chunks.sql",
+		"migrations/005_folders.sql",
+		"migrations/006_upload_task_parent.sql",
 	); err != nil {
 		log.Fatal(err)
 	}
@@ -74,7 +76,7 @@ func main() {
 			return
 		}
 		if cleaned > 0 {
-			log.Printf("cleanup %d expired uploads tasks", cleaned)
+			log.Printf("cleaned %d expired upload tasks", cleaned)
 		}
 	}
 
@@ -116,6 +118,13 @@ func main() {
 	protected.POST("/uploads/:id/complete", uploadHandler.Complete)
 	protected.GET("/uploads/:id", uploadHandler.GetStatus)
 	protected.DELETE("/uploads/:id", uploadHandler.Cancel)
+	protected.POST("/folders", fileHandler.CreateFolder)
+	protected.GET("/folders", fileHandler.ListFolders)
+	protected.PATCH("/files/:id/move", fileHandler.MoveActive)
+	protected.PATCH("/files/:id/rename", fileHandler.RenameActive)
+	protected.PATCH("/folders/:id/rename", fileHandler.RenameFolder)
+	protected.PATCH("/folders/:id/move", fileHandler.MoveFolder)
+	protected.DELETE("/folders/:id", fileHandler.DeleteFolder)
 
 	if err := r.Run(cfg.HTTPAddr); err != nil {
 		log.Fatal(err)

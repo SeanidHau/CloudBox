@@ -21,9 +21,10 @@ func NewRepository(db *sql.DB) *Repository {
 
 func (r *Repository) Create(task *Task) (*Task, error) {
 	_, err := r.db.Exec(
-		`INSERT INTO upload_tasks (id, user_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO upload_tasks (id, user_id, parent_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID,
 		task.UserID,
+		task.ParentID,
 		task.OriginalName,
 		task.ContentType,
 		task.FileSize,
@@ -41,34 +42,13 @@ func (r *Repository) Create(task *Task) (*Task, error) {
 }
 
 func (r *Repository) FindByID(userID int64, taskID string) (*Task, error) {
-	var task Task
-
-	err := r.db.QueryRow(
-		`SELECT id, user_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir, created_at, updated_at FROM upload_tasks WHERE id = ? AND user_id = ?`,
+	row := r.db.QueryRow(
+		`SELECT id, user_id, parent_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir, created_at, updated_at FROM upload_tasks WHERE id = ? AND user_id = ?`,
 		taskID,
 		userID,
-	).Scan(
-		&task.ID,
-		&task.UserID,
-		&task.OriginalName,
-		&task.ContentType,
-		&task.FileSize,
-		&task.ChunkSize,
-		&task.TotalChunks,
-		&task.FileHash,
-		&task.Status,
-		&task.TempDir,
-		&task.CreatedAt,
-		&task.UpdatedAt,
 	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrTaskNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
 
-	return &task, nil
+	return scanTask(row)
 }
 
 func (r *Repository) UpsertChunk(chunk *Chunk) (*Chunk, error) {
@@ -186,7 +166,7 @@ func (r *Repository) TouchUploading(userID int64, taskID string) (bool, error) {
 
 func (r *Repository) ListExpiredUploading(before time.Time) ([]Task, error) {
 	rows, err := r.db.Query(
-		`SELECT id, user_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir, created_at, updated_at FROM upload_tasks WHERE status = ? AND updated_at < ? ORDER BY updated_at`,
+		`SELECT id, user_id, parent_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir, created_at, updated_at FROM upload_tasks WHERE status = ? AND updated_at < ? ORDER BY updated_at`,
 		StatusUploading,
 		before.UTC().Format("2006-01-02 15:04:05"),
 	)
@@ -198,25 +178,12 @@ func (r *Repository) ListExpiredUploading(before time.Time) ([]Task, error) {
 	tasks := make([]Task, 0)
 
 	for rows.Next() {
-		var task Task
-		if err := rows.Scan(
-			&task.ID,
-			&task.UserID,
-			&task.OriginalName,
-			&task.ContentType,
-			&task.FileSize,
-			&task.ChunkSize,
-			&task.TotalChunks,
-			&task.FileHash,
-			&task.Status,
-			&task.TempDir,
-			&task.CreatedAt,
-			&task.UpdatedAt,
-		); err != nil {
+		task, err := scanTask(rows)
+		if err != nil {
 			return nil, err
 		}
 
-		tasks = append(tasks, task)
+		tasks = append(tasks, *task)
 	}
 
 	if err := rows.Err(); err != nil {
@@ -224,4 +191,43 @@ func (r *Repository) ListExpiredUploading(before time.Time) ([]Task, error) {
 	}
 
 	return tasks, nil
+}
+
+type taskScanner interface {
+	Scan(...any) error
+}
+
+func scanTask(scanner taskScanner) (*Task, error) {
+	var (
+		task     Task
+		parentID sql.NullInt64
+	)
+
+	err := scanner.Scan(
+		&task.ID,
+		&task.UserID,
+		&parentID,
+		&task.OriginalName,
+		&task.ContentType,
+		&task.FileSize,
+		&task.ChunkSize,
+		&task.TotalChunks,
+		&task.FileHash,
+		&task.Status,
+		&task.TempDir,
+		&task.CreatedAt,
+		&task.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrTaskNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if parentID.Valid {
+		task.ParentID = &parentID.Int64
+	}
+
+	return &task, nil
 }

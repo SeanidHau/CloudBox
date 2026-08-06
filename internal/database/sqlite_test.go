@@ -142,8 +142,10 @@ func TestMigrateCreatesUploadTasksAndChunks(t *testing.T) {
 	fileObjectsMigration := "../../migrations/002_file_objects.sql"
 	uploadTasksMigration := "../../migrations/003_upload_tasks.sql"
 	fixUploadChunksMigration := "../../migrations/004_fix_upload_chunks.sql"
-	if err := Migrate(db, initMigration, fileObjectsMigration, uploadTasksMigration, fixUploadChunksMigration); err != nil {
-		t.Fatalf("apply upload task migrations: %v", err)
+	foldersMigration := "../../migrations/005_folders.sql"
+	uploadTaskParentMigration := "../../migrations/006_upload_task_parent.sql"
+	if err := Migrate(db, initMigration, fileObjectsMigration, uploadTasksMigration, fixUploadChunksMigration, foldersMigration, uploadTaskParentMigration); err != nil {
+		t.Fatalf("apply upload task and folder migrations: %v", err)
 	}
 
 	if _, err := db.Exec(`INSERT INTO users (id, username, password_hash) VALUES (1, 'sean', 'hash')`); err != nil {
@@ -178,7 +180,30 @@ func TestMigrateCreatesUploadTasksAndChunks(t *testing.T) {
 		t.Fatal("expected missing upload task to fail")
 	}
 
-	if err := Migrate(db, initMigration, fileObjectsMigration, uploadTasksMigration, fixUploadChunksMigration); err != nil {
-		t.Fatalf("reapply upload task migrations: %v", err)
+	if _, err := db.Exec(`INSERT INTO folders (user_id, name) VALUES (1, 'documents')`); err != nil {
+		t.Fatalf("insert root folder: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO folders (user_id, name) VALUES (1, 'documents')`); err == nil {
+		t.Fatal("expected duplicate root folder name to fail")
+	}
+	if _, err := db.Exec(`
+		INSERT INTO upload_tasks (
+			id, user_id, parent_id, original_name, content_type,
+			file_size, chunk_size, total_chunks, temp_dir
+		) VALUES ('upload-in-folder', 1, 1, 'report.pdf', 'application/pdf', 10, 10, 1, 'uploads/tmp/upload-in-folder')
+	`); err != nil {
+		t.Fatalf("insert upload task with parent folder: %v", err)
+	}
+
+	var parentID int64
+	if err := db.QueryRow(`SELECT parent_id FROM upload_tasks WHERE id = 'upload-in-folder'`).Scan(&parentID); err != nil {
+		t.Fatalf("query upload task parent ID: %v", err)
+	}
+	if parentID != 1 {
+		t.Fatalf("upload task parent ID = %d, want 1", parentID)
+	}
+
+	if err := Migrate(db, initMigration, fileObjectsMigration, uploadTasksMigration, fixUploadChunksMigration, foldersMigration, uploadTaskParentMigration); err != nil {
+		t.Fatalf("reapply upload task and folder migrations: %v", err)
 	}
 }

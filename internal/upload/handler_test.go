@@ -102,6 +102,36 @@ func TestHandlerInitUploadRejectsInvalidFileSize(t *testing.T) {
 	}
 }
 
+func TestHandlerInitUploadValidatesParentFolder(t *testing.T) {
+	router, token := newTestHandlerRouter(t)
+
+	invalidParentBody := []byte(`{
+		"parent_id":0,
+		"original_name":"video.mp4",
+		"file_size":10,
+		"chunk_size":10
+	}`)
+	invalidParentRequest := newAuthenticatedRequest(http.MethodPost, "/uploads/init", bytes.NewReader(invalidParentBody), token)
+	invalidParentResponse := httptest.NewRecorder()
+	router.ServeHTTP(invalidParentResponse, invalidParentRequest)
+	if invalidParentResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid parent status = %d, want %d: %s", invalidParentResponse.Code, http.StatusBadRequest, invalidParentResponse.Body.String())
+	}
+
+	missingParentBody := []byte(`{
+		"parent_id":999,
+		"original_name":"video.mp4",
+		"file_size":10,
+		"chunk_size":10
+	}`)
+	missingParentRequest := newAuthenticatedRequest(http.MethodPost, "/uploads/init", bytes.NewReader(missingParentBody), token)
+	missingParentResponse := httptest.NewRecorder()
+	router.ServeHTTP(missingParentResponse, missingParentRequest)
+	if missingParentResponse.Code != http.StatusNotFound {
+		t.Fatalf("missing parent status = %d, want %d: %s", missingParentResponse.Code, http.StatusNotFound, missingParentResponse.Body.String())
+	}
+}
+
 func TestHandlerUploadChunk(t *testing.T) {
 	router, token := newTestHandlerRouter(t)
 	task := initializeUpload(t, router, token)
