@@ -22,12 +22,12 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] 文件夹树：创建、浏览、重命名、移动和仅删除空目录
 - [x] 文件重命名与移动，支持根目录和嵌套目录
 - [x] 小文件上传、秒传和分片上传均可指定目标文件夹
+- [x] 按用户统计逻辑存储用量，并以默认 1 GiB 配额限制上传
 - [x] Repository、Service 和 HTTP Handler 的自动化测试
 - [x] 真实 HTTP 端到端验证：初始化、三块上传、合并、下载校验
 
 ### 未完成
 
-- [ ] 存储配额
 - [ ] 分享链接、密码、过期时间和下载次数限制
 - [ ] PostgreSQL、MinIO 和 Redis 的生产化替换
 - [ ] 异步任务，例如缩略图、病毒扫描和失败重试
@@ -116,6 +116,7 @@ Authorization: Bearer <JWT>
 | 重命名文件夹 | `PATCH /api/folders/:id/rename` |
 | 移动文件夹 | `PATCH /api/folders/:id/move` |
 | 删除空文件夹 | `DELETE /api/folders/:id` |
+| 查询存储用量和配额 | `GET /api/storage` |
 | 初始化分片上传 | `POST /api/uploads/init` |
 | 上传一个分片 | `PUT /api/uploads/:id/chunks/:number` |
 | 查询上传状态 | `GET /api/uploads/:id` |
@@ -143,6 +144,12 @@ POST /api/uploads/:id/complete
 
 分片编号从 `0` 开始。最后一块可以小于普通分片大小；其他分片必须与初始化时声明的大小一致。
 `parent_id` 可选；未传时文件位于根目录。所有目录操作均按当前 JWT 用户隔离，不能访问其他用户的目录。
+
+## 存储配额
+
+默认每位用户的逻辑配额为 `1 GiB`。`GET /api/storage` 返回已用字节数、总配额和剩余空间。
+
+逻辑用量统计包含活跃文件和回收站文件，因为回收站文件仍可恢复；内容去重不会降低用户自身的逻辑占用。小文件上传、秒传与分片上传初始化/完成都会检查配额，超额返回 `409 Conflict`。
 
 ## 最小使用示例
 

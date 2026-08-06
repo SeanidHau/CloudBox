@@ -17,6 +17,10 @@ import (
 )
 
 func newTestService(t *testing.T) *Service {
+	return newTestServiceWithQuota(t, 1<<30)
+}
+
+func newTestServiceWithQuota(t *testing.T, quotaBytes int64) *Service {
 	t.Helper()
 
 	repo := newTestRepository(t)
@@ -24,6 +28,7 @@ func newTestService(t *testing.T) *Service {
 	fileService := filemodule.NewService(
 		filemodule.NewRepository(repo.db),
 		storage.NewLocalStorage(filepath.Join(baseDir, "files")),
+		quotaBytes,
 	)
 
 	return NewService(repo, filepath.Join(baseDir, "upload-tmp"), fileService)
@@ -85,6 +90,49 @@ func TestServiceInitValidatesInput(t *testing.T) {
 	}
 	if _, err := service.Init(1, "file.txt", "text/plain", 10, 0, ""); !errors.Is(err, ErrChunkSizeInvalid) {
 		t.Fatalf("invalid chunk size error = %v, want %v", err, ErrChunkSizeInvalid)
+	}
+}
+
+func TestServiceInitRejectsUploadOverQuota(t *testing.T) {
+	service := newTestServiceWithQuota(t, 5)
+
+	if _, err := service.Init(1, "video.mp4", "video/mp4", 6, 6, ""); !errors.Is(err, filemodule.ErrStorageQuotaExceeded) {
+		t.Fatalf("init over quota error = %v, want %v", err, filemodule.ErrStorageQuotaExceeded)
+	}
+
+	var taskCount int
+	if err := service.repo.db.QueryRow(`SELECT COUNT(*) FROM upload_tasks WHERE user_id = 1`).Scan(&taskCount); err != nil {
+		t.Fatalf("count upload tasks: %v", err)
+	}
+	if taskCount != 0 {
+		t.Fatalf("task count = %d, want 0", taskCount)
+	}
+}
+
+func TestServiceCompleteRechecksStorageQuota(t *testing.T) {
+	service := newTestServiceWithQuota(t, 10)
+	task, err := service.Init(1, "video.mp4", "video/mp4", 10, 10, "")
+	if err != nil {
+		t.Fatalf("initialize upload: %v", err)
+	}
+
+	fileRepo := filemodule.NewRepository(service.repo.db)
+	if _, err := fileRepo.Create(1, "existing.txt", "uploads/existing.txt", 5, "text/plain"); err != nil {
+		t.Fatalf("create existing file: %v", err)
+	}
+	if _, err := service.UploadChunk(1, task.ID, 0, strings.NewReader("0123456789")); err != nil {
+		t.Fatalf("upload chunk: %v", err)
+	}
+	if _, err := service.Complete(1, task.ID); !errors.Is(err, filemodule.ErrStorageQuotaExceeded) {
+		t.Fatalf("complete over quota error = %v, want %v", err, filemodule.ErrStorageQuotaExceeded)
+	}
+
+	updated, err := service.repo.FindByID(1, task.ID)
+	if err != nil {
+		t.Fatalf("find task after failed completion: %v", err)
+	}
+	if updated.Status != StatusUploading {
+		t.Fatalf("task status = %q, want %q", updated.Status, StatusUploading)
 	}
 }
 
@@ -507,6 +555,10 @@ type statusCheckingUploader struct {
 }
 
 func (u *statusCheckingUploader) ValidateFolder(userID int64, parentID *int64) error {
+	return nil
+}
+
+func (u *statusCheckingUploader) EnsureStorageQuota(userID int64, additionalBytes int64) error {
 	return nil
 }
 

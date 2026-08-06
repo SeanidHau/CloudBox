@@ -597,3 +597,17 @@ func (r *Repository) DeleteEmptyFolder(
 
 	return affected == 1, nil
 }
+
+func (r *Repository) TotalFileSizeByUser(userID int64) (int64, error) {
+	var total int64
+
+	err := r.db.QueryRow(
+		`SELECT COALESCE(SUM(size), 0) FROM user_files WHERE user_id = ?`,
+		userID,
+	).Scan(&total)
+	if err != nil {
+		return 0, err
+	}
+
+	return total, nil
+}

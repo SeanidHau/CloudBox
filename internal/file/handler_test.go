@@ -22,11 +22,15 @@ import (
 const testJWTSecret = "test-secret"
 
 func newTestFileRouter(t *testing.T) (*gin.Engine, string) {
+	return newTestFileRouterWithQuota(t, testStorageQuotaBytes)
+}
+
+func newTestFileRouterWithQuota(t *testing.T, quotaBytes int64) (*gin.Engine, string) {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
 
-	service := newTestServiceWithStorage(t, &fakeStorage{})
+	service := newTestServiceWithStorageQuota(t, &fakeStorage{}, quotaBytes)
 	handler := NewHandler(service)
 
 	router := gin.New()
@@ -46,6 +50,7 @@ func newTestFileRouter(t *testing.T) (*gin.Engine, string) {
 	protected.PATCH("/folders/:id/rename", handler.RenameFolder)
 	protected.PATCH("/folders/:id/move", handler.MoveFolder)
 	protected.DELETE("/folders/:id", handler.DeleteFolder)
+	protected.GET("/storage", handler.GetStorageUsage)
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id": int64(1),
@@ -968,5 +973,75 @@ func TestFileHandlerDeletesFolder(t *testing.T) {
 	router.ServeHTTP(invalidResponse, invalidRequest)
 	if invalidResponse.Code != http.StatusBadRequest {
 		t.Fatalf("invalid folder status = %d, want %d", invalidResponse.Code, http.StatusBadRequest)
+	}
+}
+
+func TestFileHandlerGetsStorageUsage(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	var uploadBody bytes.Buffer
+	writer := multipart.NewWriter(&uploadBody)
+	part, err := writer.CreateFormFile("file", "usage.txt")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := part.Write([]byte("hello")); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	uploadRequest := newAuthenticatedRequest(http.MethodPost, "/files", &uploadBody, token)
+	uploadRequest.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadResponse := httptest.NewRecorder()
+	router.ServeHTTP(uploadResponse, uploadRequest)
+	if uploadResponse.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, want %d: %s", uploadResponse.Code, http.StatusCreated, uploadResponse.Body.String())
+	}
+
+	usageRequest := newAuthenticatedRequest(http.MethodGet, "/storage", nil, token)
+	usageResponse := httptest.NewRecorder()
+	router.ServeHTTP(usageResponse, usageRequest)
+	if usageResponse.Code != http.StatusOK {
+		t.Fatalf("storage status = %d, want %d: %s", usageResponse.Code, http.StatusOK, usageResponse.Body.String())
+	}
+
+	var result struct {
+		Storage StorageUsage `json:"storage"`
+	}
+	if err := json.Unmarshal(usageResponse.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode storage response: %v", err)
+	}
+	if result.Storage.UsedBytes != 5 {
+		t.Fatalf("used bytes = %d, want 5", result.Storage.UsedBytes)
+	}
+	if result.Storage.QuotaBytes != testStorageQuotaBytes {
+		t.Fatalf("quota bytes = %d, want %d", result.Storage.QuotaBytes, testStorageQuotaBytes)
+	}
+}
+
+func TestFileHandlerRejectsUploadOverQuota(t *testing.T) {
+	router, token := newTestFileRouterWithQuota(t, 5)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "too-large.txt")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := part.Write([]byte("123456")); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	request := newAuthenticatedRequest(http.MethodPost, "/files", &body, token)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("upload over quota status = %d, want %d: %s", response.Code, http.StatusConflict, response.Body.String())
 	}
 }

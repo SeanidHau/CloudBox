@@ -56,7 +56,11 @@ func main() {
 
 	localStorage := storage.NewLocalStorage(cfg.UploadDir)
 	filerepo := filemodule.NewRepository(db)
-	fileService := filemodule.NewService(filerepo, localStorage)
+	fileService := filemodule.NewService(
+		filerepo,
+		localStorage,
+		cfg.UserStorageQuotaBytes,
+	)
 	fileHandler := filemodule.NewHandler(fileService)
 
 	uploadRepo := uploadmodule.NewRepository(db)
@@ -125,6 +129,7 @@ func main() {
 	protected.PATCH("/folders/:id/rename", fileHandler.RenameFolder)
 	protected.PATCH("/folders/:id/move", fileHandler.MoveFolder)
 	protected.DELETE("/folders/:id", fileHandler.DeleteFolder)
+	protected.GET("/storage", fileHandler.GetStorageUsage)
 
 	if err := r.Run(cfg.HTTPAddr); err != nil {
 		log.Fatal(err)

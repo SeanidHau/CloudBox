@@ -32,6 +32,8 @@ var (
 type FileService interface {
 	ValidateFolder(userID int64, parentID *int64) error
 
+	EnsureStorageQuota(userID int64, additionalBytes int64) error
+
 	UploadIntoFolder(
 		userID int64,
 		parentID *int64,
@@ -124,6 +126,10 @@ func (s *Service) InitInFolder(
 		},
 		Status:  StatusUploading,
 		TempDir: filepath.Join(s.tempBaseDir, taskID),
+	}
+
+	if err := s.fileService.EnsureStorageQuota(userID, fileSize); err != nil {
+		return nil, err
 	}
 
 	if err := os.MkdirAll(task.TempDir, 0755); err != nil {

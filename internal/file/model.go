@@ -41,3 +41,9 @@ type FileObject struct {
 	ReferenceCount int       `json:"reference_count"`
 	CreatedAt      time.Time `json:"created_at"`
 }
+
+type StorageUsage struct {
+	UsedBytes      int64 `json:"used_bytes"`
+	QuotaBytes     int64 `json:"quota_bytes"`
+	AvailableBytes int64 `json:"available_bytes"`
+}

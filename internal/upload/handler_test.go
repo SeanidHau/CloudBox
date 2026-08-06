@@ -17,11 +17,15 @@ import (
 const testJWTSecret = "test-secret"
 
 func newTestHandlerRouter(t *testing.T) (*gin.Engine, string) {
+	return newTestHandlerRouterWithQuota(t, 1<<30)
+}
+
+func newTestHandlerRouterWithQuota(t *testing.T, quotaBytes int64) (*gin.Engine, string) {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
 
-	handler := NewHandler(newTestService(t))
+	handler := NewHandler(newTestServiceWithQuota(t, quotaBytes))
 	router := gin.New()
 	protected := router.Group("")
 	protected.Use(middleware.Auth(testJWTSecret))
@@ -99,6 +103,23 @@ func TestHandlerInitUploadRejectsInvalidFileSize(t *testing.T) {
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("init status = %d, want %d: %s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+}
+
+func TestHandlerInitUploadRejectsQuotaExceeded(t *testing.T) {
+	router, token := newTestHandlerRouterWithQuota(t, 5)
+
+	requestBody := []byte(`{
+		"original_name":"video.mp4",
+		"file_size":6,
+		"chunk_size":6
+	}`)
+	request := newAuthenticatedRequest(http.MethodPost, "/uploads/init", bytes.NewReader(requestBody), token)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("init over quota status = %d, want %d: %s", response.Code, http.StatusConflict, response.Body.String())
 	}
 }
 

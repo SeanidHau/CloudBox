@@ -24,6 +24,8 @@ type fakeReadSeekCloser struct {
 	*strings.Reader
 }
 
+const testStorageQuotaBytes int64 = 1 << 30
+
 func (r fakeReadSeekCloser) Close() error {
 	return nil
 }
@@ -65,6 +67,10 @@ func (s *fakeStorage) Delete(storagePath string) error {
 }
 
 func newTestServiceWithStorage(t *testing.T, storage Storage) *Service {
+	return newTestServiceWithStorageQuota(t, storage, testStorageQuotaBytes)
+}
+
+func newTestServiceWithStorageQuota(t *testing.T, storage Storage, quotaBytes int64) *Service {
 	t.Helper()
 
 	db, err := database.Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
@@ -91,7 +97,7 @@ func newTestServiceWithStorage(t *testing.T, storage Storage) *Service {
 		t.Fatalf("insert user 2: %v", err)
 	}
 
-	return NewService(NewRepository(db), storage)
+	return NewService(NewRepository(db), storage, quotaBytes)
 }
 
 func TestServiceUploadAndOpenForDownload(t *testing.T) {
@@ -128,6 +134,58 @@ func TestServiceUploadAndOpenForDownload(t *testing.T) {
 	}
 	if string(content) != "hello cloudbox" {
 		t.Fatalf("downloaded content = %q, want %q", string(content), "hello cloudbox")
+	}
+}
+
+func TestServiceGetStorageUsage(t *testing.T) {
+	service := newTestServiceWithStorage(t, &fakeStorage{})
+
+	first, err := service.Upload(1, "first.txt", "text/plain", strings.NewReader("hello"))
+	if err != nil {
+		t.Fatalf("upload first file: %v", err)
+	}
+	if _, err := service.Upload(1, "second.txt", "text/plain", strings.NewReader("world!")); err != nil {
+		t.Fatalf("upload second file: %v", err)
+	}
+	if err := service.SoftDelete(1, first.ID); err != nil {
+		t.Fatalf("soft delete first file: %v", err)
+	}
+
+	usage, err := service.GetStorageUsage(1)
+	if err != nil {
+		t.Fatalf("get storage usage: %v", err)
+	}
+	if usage.UsedBytes != 11 {
+		t.Fatalf("used bytes = %d, want 11", usage.UsedBytes)
+	}
+	if usage.QuotaBytes != testStorageQuotaBytes {
+		t.Fatalf("quota bytes = %d, want %d", usage.QuotaBytes, testStorageQuotaBytes)
+	}
+	if usage.AvailableBytes != testStorageQuotaBytes-11 {
+		t.Fatalf("available bytes = %d, want %d", usage.AvailableBytes, testStorageQuotaBytes-11)
+	}
+}
+
+func TestServiceEnforcesStorageQuota(t *testing.T) {
+	storage := &fakeStorage{}
+	service := newTestServiceWithStorageQuota(t, storage, 5)
+
+	if _, err := service.Upload(1, "first.txt", "text/plain", strings.NewReader("hello")); err != nil {
+		t.Fatalf("upload within quota: %v", err)
+	}
+	if _, err := service.Upload(1, "second.txt", "text/plain", strings.NewReader("!")); !errors.Is(err, ErrStorageQuotaExceeded) {
+		t.Fatalf("upload over quota error = %v, want %v", err, ErrStorageQuotaExceeded)
+	}
+	if storage.deletedPath != "uploads/second.txt" {
+		t.Fatalf("rejected upload should be deleted, got %q", storage.deletedPath)
+	}
+
+	object, err := service.repo.CreateFileObject("instant-over-quota", "uploads/shared.txt", 1, "text/plain")
+	if err != nil {
+		t.Fatalf("create instant upload object: %v", err)
+	}
+	if _, err := service.InstantUpload(1, "copy.txt", object.FileHash); !errors.Is(err, ErrStorageQuotaExceeded) {
+		t.Fatalf("instant upload over quota error = %v, want %v", err, ErrStorageQuotaExceeded)
 	}
 }
 

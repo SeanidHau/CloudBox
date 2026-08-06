@@ -322,6 +322,32 @@ func TestRepositoryDeleteEmptyFolder(t *testing.T) {
 	}
 }
 
+func TestRepositoryTotalFileSizeByUser(t *testing.T) {
+	repo := newTestRepository(t)
+
+	first, err := repo.Create(1, "first.txt", "uploads/first.txt", 5, "text/plain")
+	if err != nil {
+		t.Fatalf("create first file: %v", err)
+	}
+	if _, err := repo.Create(1, "second.txt", "uploads/second.txt", 6, "text/plain"); err != nil {
+		t.Fatalf("create second file: %v", err)
+	}
+	if _, err := repo.Create(2, "private.txt", "uploads/private.txt", 100, "text/plain"); err != nil {
+		t.Fatalf("create other user file: %v", err)
+	}
+	if err := repo.SoftDelete(1, first.ID); err != nil {
+		t.Fatalf("soft delete first file: %v", err)
+	}
+
+	total, err := repo.TotalFileSizeByUser(1)
+	if err != nil {
+		t.Fatalf("get user file size: %v", err)
+	}
+	if total != 11 {
+		t.Fatalf("total size = %d, want 11", total)
+	}
+}
+
 func TestRepositoryCreateAndFindFileObject(t *testing.T) {
 	repo := newTestRepository(t)
 

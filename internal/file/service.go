@@ -14,6 +14,7 @@ var (
 	ErrFolderAlreadyExists  = errors.New("folder already exists")
 	ErrFolderMoveCycle      = errors.New("folder cannot be moved into itself or its descendant")
 	ErrFolderNotEmpty       = errors.New("folder is not empty")
+	ErrStorageQuotaExceeded = errors.New("storage quota exceeded")
 )
 
 type Storage interface {
@@ -23,14 +24,20 @@ type Storage interface {
 }
 
 type Service struct {
-	repo    *Repository
-	storage Storage
+	repo              *Repository
+	storage           Storage
+	storageQuotaBytes int64
 }
 
-func NewService(repo *Repository, storage Storage) *Service {
+func NewService(
+	repo *Repository,
+	storage Storage,
+	storageQuotaBytes int64,
+) *Service {
 	return &Service{
-		repo:    repo,
-		storage: storage,
+		repo:              repo,
+		storage:           storage,
+		storageQuotaBytes: storageQuotaBytes,
 	}
 }
 
@@ -66,6 +73,11 @@ func (s *Service) UploadIntoFolder(
 
 	storagePath, size, fileHash, err := s.storage.Save(reader, originalName)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := s.EnsureStorageQuota(userID, size); err != nil {
+		_ = s.storage.Delete(storagePath)
 		return nil, err
 	}
 
@@ -178,6 +190,10 @@ func (s *Service) InstantUploadIntoFolder(
 
 	object, err := s.repo.FindFileObjectByHash(fileHash)
 	if err != nil {
+		return nil, err
+	}
+
+	if err := s.EnsureStorageQuota(userID, object.Size); err != nil {
 		return nil, err
 	}
 
@@ -341,6 +357,41 @@ func (s *Service) DeleteFolder(userID int64, folderID int64) error {
 	}
 	if !deleted {
 		return ErrFolderNotEmpty
+	}
+
+	return nil
+}
+
+func (s *Service) GetStorageUsage(userID int64) (*StorageUsage, error) {
+	usedBytes, err := s.repo.TotalFileSizeByUser(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	availableBytes := s.storageQuotaBytes - usedBytes
+	if availableBytes < 0 {
+		availableBytes = 0
+	}
+
+	return &StorageUsage{
+		UsedBytes:      usedBytes,
+		QuotaBytes:     s.storageQuotaBytes,
+		AvailableBytes: availableBytes,
+	}, nil
+}
+
+func (s *Service) EnsureStorageQuota(
+	userID int64,
+	additionalBytes int64,
+) error {
+	usedBytes, err := s.repo.TotalFileSizeByUser(userID)
+	if err != nil {
+		return err
+	}
+
+	if usedBytes > s.storageQuotaBytes ||
+		additionalBytes > s.storageQuotaBytes-usedBytes {
+		return ErrStorageQuotaExceeded
 	}
 
 	return nil

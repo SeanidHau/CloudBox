@@ -63,6 +63,10 @@ func (h *Handler) Init(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
+	if errors.Is(err, filemodule.ErrStorageQuotaExceeded) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initialize upload"})
 		return
@@ -149,7 +153,8 @@ func (h *Handler) Complete(c *gin.Context) {
 	if errors.Is(err, ErrTaskNotUploading) ||
 		errors.Is(err, ErrChunksIncomplete) ||
 		errors.Is(err, ErrChunkHashMismatch) ||
-		errors.Is(err, ErrFileHashMismatch) {
+		errors.Is(err, ErrFileHashMismatch) ||
+		errors.Is(err, filemodule.ErrStorageQuotaExceeded) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}

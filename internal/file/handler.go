@@ -98,7 +98,9 @@ func (h *Handler) Upload(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
-
+	if errors.Is(err, ErrStorageQuotaExceeded) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to upload file"})
 		return
@@ -283,6 +285,9 @@ func (h *Handler) InstantUpload(c *gin.Context) {
 	if errors.Is(err, ErrFileObjectNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "file object not found"})
 		return
+	}
+	if errors.Is(err, ErrStorageQuotaExceeded) {
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create instant upload"})
@@ -552,4 +557,22 @@ func (h *Handler) DeleteFolder(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) GetStorageUsage(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	usage, err := h.service.GetStorageUsage(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get storage usage"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"storage": usage,
+	})
 }
