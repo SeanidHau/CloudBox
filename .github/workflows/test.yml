@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [main]
 
-premissions:
+permissions:
   contents: read
 
 jobs:
@@ -32,7 +32,7 @@ jobs:
           test -z "$(gofmt -l $files)"
 
       - name: Vet
-        run: go vet ./..
+        run: go vet ./...
 
       - name: Test
         run: go test ./...
