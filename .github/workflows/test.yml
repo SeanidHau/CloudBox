@@ -12,6 +12,21 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      minio:
+        image: minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
+        env:
+          # These credentials exist only inside the disposable CI service.
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        command: server /data
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "mc ready local"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     steps:
       - name: Checkout
@@ -36,6 +51,14 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: Test MinIO storage integration
+        env:
+          MINIO_INTEGRATION_ENDPOINT: localhost:9000
+          MINIO_INTEGRATION_ACCESS_KEY: minioadmin
+          MINIO_INTEGRATION_SECRET_KEY: minioadmin
+          MINIO_INTEGRATION_BUCKET: cloudbox
+        run: go test -tags=integration ./internal/storage
 
       - name: Build Docker image
         run: docker build --tag cloudbox:ci .
