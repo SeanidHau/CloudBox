@@ -10,3 +10,5 @@ uploads/
 bin/
 dist/
 *.exe
+
+.env

@@ -1,0 +1,12 @@
+.git
+.github
+.idea
+docs
+uploads
+*.db
+*.db-shm
+*.db-wal
+bin
+dist
+test.txt
+downloaded-test.txt

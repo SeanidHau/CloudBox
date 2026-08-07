@@ -26,13 +26,15 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] 分享链接：安全 token、可选密码、过期时间、下载次数限制和主动撤销
 - [x] 公开分享下载支持 HTTP Range，并在文件删除、链接过期或撤销后拒绝访问
 - [x] Repository、Service 和 HTTP Handler 的自动化测试
+- [x] GitHub Actions：推送和 Pull Request 自动执行格式检查、`go vet` 与全量测试
+- [x] Docker 多阶段构建和 Docker Compose 本地部署，SQLite 与上传数据可持久化
 - [x] 真实 HTTP 端到端验证：初始化、三块上传、合并、下载校验
 
 ### 未完成
 
 - [ ] PostgreSQL、MinIO 和 Redis 的生产化替换
 - [ ] 异步任务，例如缩略图、病毒扫描和失败重试
-- [ ] Docker Compose、GitHub Actions、指标、日志和链路追踪
+- [ ] 指标、结构化日志和链路追踪
 - [ ] Web 前端
 
 ## 技术栈
@@ -91,6 +93,33 @@ docs/                学习设计和历史计划
 ```bash
 curl http://localhost:8080/health
 ```
+
+## Docker Compose
+
+Docker Desktop 启动后，先准备本地环境变量文件：
+
+```bash
+cp .env.example .env
+```
+
+将 `.env` 中的 `JWT_SECRET` 修改为随机长字符串，再启动服务：
+
+```bash
+docker compose up --build -d
+curl http://localhost:8080/health
+```
+
+Compose 会把 SQLite 数据库和上传文件保存在命名 volume `cloudbox-data` 的 `/data` 目录。停止容器不会删除该 volume；查看服务日志可使用 `docker compose logs -f api`。
+
+可用的环境变量：
+
+| 变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `HTTP_ADDR` | `:8080` | HTTP 监听地址 |
+| `DB_PATH` | `cloudbox.db` | SQLite 数据库路径 |
+| `UPLOAD_DIR` | `uploads` | 文件和分片存储目录 |
+| `JWT_SECRET` | `dev-secret-change-me` | JWT 签名密钥 |
+| `USER_STORAGE_QUOTA_BYTES` | `1073741824` | 单用户逻辑存储配额 |
 
 ## API 一览
 
