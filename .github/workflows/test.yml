@@ -36,3 +36,6 @@ jobs:
 
       - name: Test
         run: go test ./...
+
+      - name: Build Docker image
+        run: docker build --tag cloudbox:ci .
