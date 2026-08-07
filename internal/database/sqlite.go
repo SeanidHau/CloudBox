@@ -17,7 +17,12 @@ func Open(path string) (*sql.DB, error) {
 	db.SetMaxOpenConns(1)
 
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
+		return nil, err
+	}
+
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 

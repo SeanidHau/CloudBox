@@ -11,6 +11,7 @@ import (
 	"github.com/SeanidHau/CloudBox/internal/database"
 	filemodule "github.com/SeanidHau/CloudBox/internal/file"
 	"github.com/SeanidHau/CloudBox/internal/middleware"
+	sharemodule "github.com/SeanidHau/CloudBox/internal/share"
 	"github.com/SeanidHau/CloudBox/internal/storage"
 	uploadmodule "github.com/SeanidHau/CloudBox/internal/upload"
 	"github.com/gin-gonic/gin"
@@ -33,6 +34,7 @@ func main() {
 		"migrations/004_fix_upload_chunks.sql",
 		"migrations/005_folders.sql",
 		"migrations/006_upload_task_parent.sql",
+		"migrations/007_file_shares.sql",
 	); err != nil {
 		log.Fatal(err)
 	}
@@ -62,6 +64,10 @@ func main() {
 		cfg.UserStorageQuotaBytes,
 	)
 	fileHandler := filemodule.NewHandler(fileService)
+
+	shareRepo := sharemodule.NewRepository(db)
+	shareService := sharemodule.NewService(shareRepo, localStorage)
+	shareHandler := sharemodule.NewHandler(shareService)
 
 	uploadRepo := uploadmodule.NewRepository(db)
 	uploadService := uploadmodule.NewService(
@@ -94,6 +100,8 @@ func main() {
 			cleanupExpiredUploads()
 		}
 	}()
+
+	api.GET("/shares/:token/download", shareHandler.Download)
 
 	protected := api.Group("")
 	protected.Use(middleware.Auth(cfg.JWTSecret))
@@ -130,6 +138,9 @@ func main() {
 	protected.PATCH("/folders/:id/move", fileHandler.MoveFolder)
 	protected.DELETE("/folders/:id", fileHandler.DeleteFolder)
 	protected.GET("/storage", fileHandler.GetStorageUsage)
+	protected.POST("/files/:id/shares", shareHandler.Create)
+	protected.GET("/shares", shareHandler.List)
+	protected.DELETE("/shares/:token", shareHandler.Revoke)
 
 	if err := r.Run(cfg.HTTPAddr); err != nil {
 		log.Fatal(err)

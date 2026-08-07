@@ -144,8 +144,9 @@ func TestMigrateCreatesUploadTasksAndChunks(t *testing.T) {
 	fixUploadChunksMigration := "../../migrations/004_fix_upload_chunks.sql"
 	foldersMigration := "../../migrations/005_folders.sql"
 	uploadTaskParentMigration := "../../migrations/006_upload_task_parent.sql"
-	if err := Migrate(db, initMigration, fileObjectsMigration, uploadTasksMigration, fixUploadChunksMigration, foldersMigration, uploadTaskParentMigration); err != nil {
-		t.Fatalf("apply upload task and folder migrations: %v", err)
+	fileSharesMigration := "../../migrations/007_file_shares.sql"
+	if err := Migrate(db, initMigration, fileObjectsMigration, uploadTasksMigration, fixUploadChunksMigration, foldersMigration, uploadTaskParentMigration, fileSharesMigration); err != nil {
+		t.Fatalf("apply upload task, folder, and file share migrations: %v", err)
 	}
 
 	if _, err := db.Exec(`INSERT INTO users (id, username, password_hash) VALUES (1, 'sean', 'hash')`); err != nil {
@@ -203,7 +204,113 @@ func TestMigrateCreatesUploadTasksAndChunks(t *testing.T) {
 		t.Fatalf("upload task parent ID = %d, want 1", parentID)
 	}
 
-	if err := Migrate(db, initMigration, fileObjectsMigration, uploadTasksMigration, fixUploadChunksMigration, foldersMigration, uploadTaskParentMigration); err != nil {
-		t.Fatalf("reapply upload task and folder migrations: %v", err)
+	if err := Migrate(db, initMigration, fileObjectsMigration, uploadTasksMigration, fixUploadChunksMigration, foldersMigration, uploadTaskParentMigration, fileSharesMigration); err != nil {
+		t.Fatalf("reapply upload task, folder, and file share migrations: %v", err)
+	}
+}
+
+func TestMigrateFileSharesEnforcesConstraints(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+
+	if err := Migrate(
+		db,
+		"../../migrations/001_init.sql",
+		"../../migrations/002_file_objects.sql",
+		"../../migrations/003_upload_tasks.sql",
+		"../../migrations/004_fix_upload_chunks.sql",
+		"../../migrations/005_folders.sql",
+		"../../migrations/006_upload_task_parent.sql",
+		"../../migrations/007_file_shares.sql",
+	); err != nil {
+		t.Fatalf("apply file share migration: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO users (id, username, password_hash) VALUES (1, 'sean', 'hash')`); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO file_objects (id, file_hash, storage_path, size, content_type)
+		VALUES (1, 'file-hash', 'uploads/file.txt', 15, 'text/plain')
+	`); err != nil {
+		t.Fatalf("insert file object: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO user_files (id, user_id, original_name, storage_path, size, content_type, object_id)
+		VALUES (1, 1, 'file.txt', 'uploads/file.txt', 15, 'text/plain', 1)
+	`); err != nil {
+		t.Fatalf("insert user file: %v", err)
+	}
+
+	// A normal share can reference an existing user file and start with zero downloads.
+	if _, err := db.Exec(`
+		INSERT INTO file_shares (token, user_file_id, max_downloads)
+		VALUES ('share-token', 1, 2)
+	`); err != nil {
+		t.Fatalf("insert valid share: %v", err)
+	}
+
+	var downloadCount int64
+	if err := db.QueryRow(`SELECT download_count FROM file_shares WHERE token = 'share-token'`).Scan(&downloadCount); err != nil {
+		t.Fatalf("query share: %v", err)
+	}
+	if downloadCount != 0 {
+		t.Fatalf("download count = %d, want 0", downloadCount)
+	}
+
+	invalidInserts := []struct {
+		name  string
+		query string
+	}{
+		{
+			name:  "duplicate token",
+			query: `INSERT INTO file_shares (token, user_file_id) VALUES ('share-token', 1)`,
+		},
+		{
+			name:  "empty token",
+			query: `INSERT INTO file_shares (token, user_file_id) VALUES ('', 1)`,
+		},
+		{
+			name:  "zero download limit",
+			query: `INSERT INTO file_shares (token, user_file_id, max_downloads) VALUES ('zero-limit', 1, 0)`,
+		},
+		{
+			name:  "download count exceeds limit",
+			query: `INSERT INTO file_shares (token, user_file_id, max_downloads, download_count) VALUES ('over-limit', 1, 1, 2)`,
+		},
+		{
+			name:  "missing user file",
+			query: `INSERT INTO file_shares (token, user_file_id) VALUES ('missing-file', 999)`,
+		},
+	}
+
+	for _, test := range invalidInserts {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := db.Exec(test.query); err == nil {
+				t.Fatal("expected insert to fail")
+			}
+		})
+	}
+
+	var indexCount int
+	if err := db.QueryRow(`
+		SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'index'
+		  AND name IN ('idx_file_shares_user_file', 'idx_file_shares_expires_at')
+	`).Scan(&indexCount); err != nil {
+		t.Fatalf("count file share indexes: %v", err)
+	}
+	if indexCount != 2 {
+		t.Fatalf("file share index count = %d, want 2", indexCount)
 	}
 }

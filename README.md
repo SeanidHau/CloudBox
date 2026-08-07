@@ -23,12 +23,13 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] 文件重命名与移动，支持根目录和嵌套目录
 - [x] 小文件上传、秒传和分片上传均可指定目标文件夹
 - [x] 按用户统计逻辑存储用量，并以默认 1 GiB 配额限制上传
+- [x] 分享链接：安全 token、可选密码、过期时间、下载次数限制和主动撤销
+- [x] 公开分享下载支持 HTTP Range，并在文件删除、链接过期或撤销后拒绝访问
 - [x] Repository、Service 和 HTTP Handler 的自动化测试
 - [x] 真实 HTTP 端到端验证：初始化、三块上传、合并、下载校验
 
 ### 未完成
 
-- [ ] 分享链接、密码、过期时间和下载次数限制
 - [ ] PostgreSQL、MinIO 和 Redis 的生产化替换
 - [ ] 异步任务，例如缩略图、病毒扫描和失败重试
 - [ ] Docker Compose、GitHub Actions、指标、日志和链路追踪
@@ -63,6 +64,7 @@ Storage      保存、打开和删除物理文件
 cmd/api/             API 入口和路由组装
 internal/auth/       注册、登录与 JWT
 internal/file/       用户文件、去重和下载
+internal/share/      分享链接、公开下载和撤销
 internal/upload/     上传任务、分片、进度和合并
 internal/storage/    本地文件存储
 internal/database/   SQLite 和版本化迁移
@@ -92,7 +94,7 @@ curl http://localhost:8080/health
 
 ## API 一览
 
-所有 `/api` 下除认证接口外的路由都需要：
+除认证接口和公开分享下载外，所有 `/api` 路由都需要：
 
 ```text
 Authorization: Bearer <JWT>
@@ -117,6 +119,10 @@ Authorization: Bearer <JWT>
 | 移动文件夹 | `PATCH /api/folders/:id/move` |
 | 删除空文件夹 | `DELETE /api/folders/:id` |
 | 查询存储用量和配额 | `GET /api/storage` |
+| 创建分享链接 | `POST /api/files/:id/shares` |
+| 查看我的分享链接 | `GET /api/shares` |
+| 撤销分享链接 | `DELETE /api/shares/:token` |
+| 公开下载分享文件 | `GET /api/shares/:token/download`，可选 `X-Share-Password` |
 | 初始化分片上传 | `POST /api/uploads/init` |
 | 上传一个分片 | `PUT /api/uploads/:id/chunks/:number` |
 | 查询上传状态 | `GET /api/uploads/:id` |
@@ -150,6 +156,20 @@ POST /api/uploads/:id/complete
 默认每位用户的逻辑配额为 `1 GiB`。`GET /api/storage` 返回已用字节数、总配额和剩余空间。
 
 逻辑用量统计包含活跃文件和回收站文件，因为回收站文件仍可恢复；内容去重不会降低用户自身的逻辑占用。小文件上传、秒传与分片上传初始化/完成都会检查配额，超额返回 `409 Conflict`。
+
+## 分享链接
+
+创建分享时可传入可选的 `password`、`expires_at`（RFC 3339 时间）和 `max_downloads`：
+
+```json
+{
+  "password": "optional-password",
+  "expires_at": "2026-08-08T12:00:00Z",
+  "max_downloads": 10
+}
+```
+
+密码只保存 bcrypt 哈希。下载次数通过单条条件更新原子递增，因此并发请求不能突破上限。公开下载不需要 JWT；受密码保护时，客户端应使用 `X-Share-Password` 请求头，而不是将密码放入 URL。链接到期或次数耗尽时返回 `410 Gone`；链接被撤销、源文件不存在或已删除时返回 `404 Not Found`。
 
 ## 最小使用示例
 
@@ -202,6 +222,7 @@ curl -X POST \
 - SHA-256 如何用于分片校验、完整性校验和内容去重
 - 上传任务状态为何要经历 `uploading -> completing -> completed`
 - `defer` 如何在失败时恢复状态并清理临时文件
+- `crypto/rand`、bcrypt 和原子 SQL 更新如何支撑公开分享的安全边界
 
 ## 验证状态
 
