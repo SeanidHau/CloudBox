@@ -9,6 +9,12 @@ func TestLoadUsesDefaults(t *testing.T) {
 		"UPLOAD_DIR",
 		"JWT_SECRET",
 		"USER_STORAGE_QUOTA_BYTES",
+		"STORAGE_DRIVER",
+		"MINIO_ENDPOINT",
+		"MINIO_ACCESS_KEY",
+		"MINIO_SECRET_KEY",
+		"MINIO_BUCKET",
+		"MINIO_USE_SSL",
 	} {
 		t.Setenv(name, "")
 	}
@@ -30,6 +36,18 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if cfg.UserStorageQuotaBytes != DefaultUserStorageQuotaBytes {
 		t.Fatalf("quota = %d, want %d", cfg.UserStorageQuotaBytes, DefaultUserStorageQuotaBytes)
 	}
+	if cfg.StorageDriver != "local" {
+		t.Fatalf("storage driver = %q, want local", cfg.StorageDriver)
+	}
+	if cfg.MinIO.Endpoint != "localhost:9000" {
+		t.Fatalf("MinIO endpoint = %q, want localhost:9000", cfg.MinIO.Endpoint)
+	}
+	if cfg.MinIO.Bucket != "cloudbox" {
+		t.Fatalf("MinIO bucket = %q, want cloudbox", cfg.MinIO.Bucket)
+	}
+	if cfg.MinIO.UseSSL {
+		t.Fatal("MinIO SSL should default to false")
+	}
 }
 
 func TestLoadUsesEnvironmentValues(t *testing.T) {
@@ -38,6 +56,12 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("UPLOAD_DIR", " /data/uploads ")
 	t.Setenv("JWT_SECRET", " production-secret ")
 	t.Setenv("USER_STORAGE_QUOTA_BYTES", "2048")
+	t.Setenv("STORAGE_DRIVER", " minio ")
+	t.Setenv("MINIO_ENDPOINT", " minio:9000 ")
+	t.Setenv("MINIO_ACCESS_KEY", " minio-user ")
+	t.Setenv("MINIO_SECRET_KEY", " minio-password ")
+	t.Setenv("MINIO_BUCKET", " cloudbox-files ")
+	t.Setenv("MINIO_USE_SSL", "true")
 
 	cfg := Load()
 
@@ -55,6 +79,30 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	}
 	if cfg.UserStorageQuotaBytes != 2048 {
 		t.Fatalf("quota = %d, want 2048", cfg.UserStorageQuotaBytes)
+	}
+	if cfg.StorageDriver != "minio" {
+		t.Fatalf("storage driver = %q, want minio", cfg.StorageDriver)
+	}
+	if cfg.MinIO.Endpoint != "minio:9000" {
+		t.Fatalf("MinIO endpoint = %q, want minio:9000", cfg.MinIO.Endpoint)
+	}
+	if cfg.MinIO.AccessKey != "minio-user" || cfg.MinIO.SecretKey != "minio-password" {
+		t.Fatalf("MinIO credentials = %#v, want configured values", cfg.MinIO)
+	}
+	if cfg.MinIO.Bucket != "cloudbox-files" {
+		t.Fatalf("MinIO bucket = %q, want cloudbox-files", cfg.MinIO.Bucket)
+	}
+	if !cfg.MinIO.UseSSL {
+		t.Fatal("MinIO SSL = false, want true")
+	}
+}
+
+func TestLoadFallsBackForInvalidMinIOUseSSL(t *testing.T) {
+	t.Setenv("MINIO_USE_SSL", "not-a-bool")
+
+	cfg := Load()
+	if cfg.MinIO.UseSSL {
+		t.Fatal("invalid MinIO SSL value should fall back to false")
 	}
 }
 

@@ -56,17 +56,40 @@ func main() {
 	api.POST("/auth/register", authHandler.Register)
 	api.POST("/auth/login", authHandler.Login)
 
-	localStorage := storage.NewLocalStorage(cfg.UploadDir)
+	var objectStorage filemodule.Storage
+
+	switch cfg.StorageDriver {
+	case "local":
+		objectStorage = storage.NewLocalStorage(cfg.UploadDir)
+
+	case "minio":
+		minIOStorage, err := storage.NewMinIOStorage(
+			cfg.MinIO.Endpoint,
+			cfg.MinIO.AccessKey,
+			cfg.MinIO.SecretKey,
+			cfg.MinIO.Bucket,
+			cfg.MinIO.UseSSL,
+		)
+		if err != nil {
+			log.Fatalf("open MinIO storage: %v", err)
+		}
+
+		objectStorage = minIOStorage
+
+	default:
+		log.Fatalf("unsupported storage driver: %s", cfg.StorageDriver)
+	}
+
 	filerepo := filemodule.NewRepository(db)
 	fileService := filemodule.NewService(
 		filerepo,
-		localStorage,
+		objectStorage,
 		cfg.UserStorageQuotaBytes,
 	)
 	fileHandler := filemodule.NewHandler(fileService)
 
 	shareRepo := sharemodule.NewRepository(db)
-	shareService := sharemodule.NewService(shareRepo, localStorage)
+	shareService := sharemodule.NewService(shareRepo, objectStorage)
 	shareHandler := sharemodule.NewHandler(shareService)
 
 	uploadRepo := uploadmodule.NewRepository(db)

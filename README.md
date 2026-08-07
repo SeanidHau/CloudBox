@@ -29,10 +29,12 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] GitHub Actions：推送和 Pull Request 自动执行格式检查、`go vet` 与全量测试
 - [x] Docker 多阶段构建和 Docker Compose 本地部署，SQLite 与上传数据可持久化
 - [x] 真实 HTTP 端到端验证：初始化、三块上传、合并、下载校验
+- [x] 可切换的对象存储：本地磁盘或 MinIO
+- [x] MinIO Docker Compose 覆盖配置与对象存储集成测试
 
 ### 未完成
 
-- [ ] PostgreSQL、MinIO 和 Redis 的生产化替换
+- [ ] PostgreSQL 和 Redis 的生产化替换
 - [ ] 异步任务，例如缩略图、病毒扫描和失败重试
 - [ ] 指标、结构化日志和链路追踪
 - [ ] Web 前端
@@ -43,7 +45,7 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - Gin
 - SQLite
 - JWT + bcrypt
-- 本地磁盘存储
+- 本地磁盘存储或 MinIO 对象存储
 - SHA-256
 
 ## 架构
@@ -57,7 +59,7 @@ Service      执行业务规则、权限边界和文件流程
     |
 Repository   访问 SQLite
     |
-Storage      保存、打开和删除物理文件
+Storage      保存、打开和删除本地文件或对象存储对象
 ```
 
 主要目录：
@@ -68,7 +70,7 @@ internal/auth/       注册、登录与 JWT
 internal/file/       用户文件、去重和下载
 internal/share/      分享链接、公开下载和撤销
 internal/upload/     上传任务、分片、进度和合并
-internal/storage/    本地文件存储
+internal/storage/    本地磁盘和 MinIO 对象存储
 internal/database/   SQLite 和版本化迁移
 migrations/          数据库迁移 SQL
 docs/                学习设计和历史计划
@@ -111,6 +113,26 @@ curl http://localhost:8080/health
 
 Compose 会把 SQLite 数据库和上传文件保存在命名 volume `cloudbox-data` 的 `/data` 目录。停止容器不会删除该 volume；查看服务日志可使用 `docker compose logs -f api`。
 
+### 使用 MinIO
+
+`compose.yaml` 默认使用本地磁盘存储。MinIO 模式通过 `compose.minio.yaml` 覆盖配置启动，并使用独立的 API 数据卷，因此不会读取或破坏本地存储模式的 SQLite 数据和上传文件。
+
+先在 `.env` 中设置 `JWT_SECRET`、`MINIO_ROOT_USER` 和 `MINIO_ROOT_PASSWORD`，再启动：
+
+```bash
+docker compose -f compose.yaml -f compose.minio.yaml up --build -d
+docker compose -f compose.yaml -f compose.minio.yaml ps
+curl http://localhost:8080/health
+```
+
+MinIO S3 API 地址为 `http://localhost:9000`，管理控制台为 `http://localhost:9001`。应用容器通过 Docker 网络中的 `minio:9000` 访问对象存储，并在启动时自动创建 `cloudbox` bucket。
+
+切回默认本地存储模式：
+
+```bash
+docker compose up --build -d
+```
+
 可用的环境变量：
 
 | 变量 | 默认值 | 用途 |
@@ -120,6 +142,12 @@ Compose 会把 SQLite 数据库和上传文件保存在命名 volume `cloudbox-d
 | `UPLOAD_DIR` | `uploads` | 文件和分片存储目录 |
 | `JWT_SECRET` | `dev-secret-change-me` | JWT 签名密钥 |
 | `USER_STORAGE_QUOTA_BYTES` | `1073741824` | 单用户逻辑存储配额 |
+| `STORAGE_DRIVER` | `local` | `local` 或 `minio` |
+| `MINIO_ENDPOINT` | `localhost:9000` | MinIO 服务地址，不包含协议 |
+| `MINIO_ACCESS_KEY` | 空 | MinIO 访问密钥 |
+| `MINIO_SECRET_KEY` | 空 | MinIO 密钥 |
+| `MINIO_BUCKET` | `cloudbox` | 保存文件对象的 bucket 名称 |
+| `MINIO_USE_SSL` | `false` | 是否使用 HTTPS 访问 MinIO |
 
 ## API 一览
 
@@ -252,6 +280,7 @@ curl -X POST \
 - 上传任务状态为何要经历 `uploading -> completing -> completed`
 - `defer` 如何在失败时恢复状态并清理临时文件
 - `crypto/rand`、bcrypt 和原子 SQL 更新如何支撑公开分享的安全边界
+- 接口如何让本地磁盘和 MinIO 在不改业务层代码的前提下互换
 
 ## 验证状态
 
@@ -262,3 +291,18 @@ curl -X POST \
 ```
 
 并已通过本地 HTTP 端到端验证：注册、登录、初始化上传、三块分片上传、状态查询、合并完成、下载内容比对。
+
+MinIO 集成测试默认不运行，避免要求每个开发和 CI 环境都启动对象存储。启动 MinIO Compose 后，可显式运行：
+
+```bash
+access_key=$(sed -n 's/^MINIO_ROOT_USER=//p' .env)
+secret_key=$(sed -n 's/^MINIO_ROOT_PASSWORD=//p' .env)
+
+MINIO_INTEGRATION_ENDPOINT=localhost:9000 \
+MINIO_INTEGRATION_ACCESS_KEY="$access_key" \
+MINIO_INTEGRATION_SECRET_KEY="$secret_key" \
+MINIO_INTEGRATION_BUCKET=cloudbox \
+/usr/local/go/bin/go test -tags=integration ./internal/storage
+```
+
+该测试实际验证 MinIO 对象的保存、SHA-256 哈希、读取、删除以及删除后不可再次读取。
