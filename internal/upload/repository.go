@@ -21,7 +21,7 @@ func NewRepository(db *sql.DB) *Repository {
 
 func (r *Repository) Create(task *Task) (*Task, error) {
 	_, err := r.db.Exec(
-		`INSERT INTO upload_tasks (id, user_id, parent_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO upload_tasks (id, user_id, parent_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		task.ID,
 		task.UserID,
 		task.ParentID,
@@ -43,7 +43,7 @@ func (r *Repository) Create(task *Task) (*Task, error) {
 
 func (r *Repository) FindByID(userID int64, taskID string) (*Task, error) {
 	row := r.db.QueryRow(
-		`SELECT id, user_id, parent_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir, created_at, updated_at FROM upload_tasks WHERE id = ? AND user_id = ?`,
+		`SELECT id, user_id, parent_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir, created_at, updated_at FROM upload_tasks WHERE id = $1 AND user_id = $2`,
 		taskID,
 		userID,
 	)
@@ -53,7 +53,7 @@ func (r *Repository) FindByID(userID int64, taskID string) (*Task, error) {
 
 func (r *Repository) UpsertChunk(chunk *Chunk) (*Chunk, error) {
 	_, err := r.db.Exec(
-		`INSERT INTO upload_chunks (upload_id, chunk_number, size, chunk_hash) VALUES (?, ?, ?, ?) ON CONFLICT(upload_id, chunk_number) DO UPDATE SET size = excluded.size, chunk_hash = excluded.chunk_hash`,
+		`INSERT INTO upload_chunks (upload_id, chunk_number, size, chunk_hash) VALUES ($1, $2, $3, $4) ON CONFLICT(upload_id, chunk_number) DO UPDATE SET size = excluded.size, chunk_hash = excluded.chunk_hash`,
 		chunk.UploadID,
 		chunk.Number,
 		chunk.Size,
@@ -70,7 +70,7 @@ func (r *Repository) FindChunk(uploadID string, chunkNumber int64) (*Chunk, erro
 	var chunk Chunk
 
 	err := r.db.QueryRow(
-		`SELECT upload_id, chunk_number, size, chunk_hash, created_at FROM upload_chunks WHERE upload_id = ? AND chunk_number = ?`,
+		`SELECT upload_id, chunk_number, size, chunk_hash, created_at FROM upload_chunks WHERE upload_id = $1 AND chunk_number = $2`,
 		uploadID,
 		chunkNumber,
 	).Scan(
@@ -93,7 +93,7 @@ func (r *Repository) FindChunk(uploadID string, chunkNumber int64) (*Chunk, erro
 
 func (r *Repository) ListChunks(uploadID string) ([]Chunk, error) {
 	rows, err := r.db.Query(
-		`SELECT upload_id, chunk_number, size, chunk_hash, created_at FROM upload_chunks WHERE upload_id = ? ORDER BY chunk_number`,
+		`SELECT upload_id, chunk_number, size, chunk_hash, created_at FROM upload_chunks WHERE upload_id = $1 ORDER BY chunk_number`,
 		uploadID,
 	)
 	if err != nil {
@@ -128,7 +128,7 @@ func (r *Repository) ListChunks(uploadID string) ([]Chunk, error) {
 
 func (r *Repository) TransitionStatus(userID int64, taskID string, fromStatus string, toStatus string) (bool, error) {
 	result, err := r.db.Exec(
-		`UPDATE upload_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND status = ?`,
+		`UPDATE upload_tasks SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND user_id = $3 AND status = $4`,
 		toStatus,
 		taskID,
 		userID,
@@ -148,7 +148,7 @@ func (r *Repository) TransitionStatus(userID int64, taskID string, fromStatus st
 
 func (r *Repository) TouchUploading(userID int64, taskID string) (bool, error) {
 	result, err := r.db.Exec(
-		`UPDATE upload_tasks SET updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND status = ?`,
+		`UPDATE upload_tasks SET updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND user_id = $2 AND status = $3`,
 		taskID,
 		userID,
 		StatusUploading,
@@ -166,7 +166,7 @@ func (r *Repository) TouchUploading(userID int64, taskID string) (bool, error) {
 
 func (r *Repository) ListExpiredUploading(before time.Time) ([]Task, error) {
 	rows, err := r.db.Query(
-		`SELECT id, user_id, parent_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir, created_at, updated_at FROM upload_tasks WHERE status = ? AND updated_at < ? ORDER BY updated_at`,
+		`SELECT id, user_id, parent_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir, created_at, updated_at FROM upload_tasks WHERE status = $1 AND updated_at < $2 ORDER BY updated_at`,
 		StatusUploading,
 		before.UTC().Format("2006-01-02 15:04:05"),
 	)

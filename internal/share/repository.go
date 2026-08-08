@@ -28,7 +28,7 @@ func (r *Repository) Create(share *Share) (*Share, error) {
 	}
 
 	_, err := r.db.Exec(
-		`INSERT INTO file_shares (token, user_file_id, password_hash, expires_at, max_downloads) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO file_shares (token, user_file_id, password_hash, expires_at, max_downloads) VALUES ($1, $2, $3, $4, $5)`,
 		share.Token,
 		share.UserFileID,
 		passwordHash,
@@ -44,7 +44,7 @@ func (r *Repository) Create(share *Share) (*Share, error) {
 
 func (r *Repository) FindByToken(token string) (*Share, error) {
 	row := r.db.QueryRow(
-		`SELECT token, user_file_id, password_hash, expires_at, max_downloads, download_count, created_at FROM file_shares WHERE token = ?`,
+		`SELECT token, user_file_id, password_hash, expires_at, max_downloads, download_count, created_at FROM file_shares WHERE token = $1`,
 		token,
 	)
 
@@ -62,7 +62,7 @@ func (r *Repository) FindByToken(token string) (*Share, error) {
 func (r *Repository) HasActiveFile(userID int64, fileID int64) (bool, error) {
 	var exists bool
 
-	err := r.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM user_files WHERE id = ? AND user_id = ? AND status = 'active')`,
+	err := r.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM user_files WHERE id = $1 AND user_id = $2 AND status = 'active')`,
 		fileID,
 		userID,
 	).Scan(&exists)
@@ -115,7 +115,7 @@ func (r *Repository) FindActiveFileByShareToken(token string) (*SharedFile, erro
 	var file SharedFile
 
 	err := r.db.QueryRow(
-		`SELECT uf.id, uf.original_name, uf.storage_path, uf.size, uf.content_type FROM file_shares AS fs JOIN user_files AS uf ON uf.id = fs.user_file_id WHERE fs.token = ? AND uf.status = 'active'`,
+		`SELECT uf.id, uf.original_name, uf.storage_path, uf.size, uf.content_type FROM file_shares AS fs JOIN user_files AS uf ON uf.id = fs.user_file_id WHERE fs.token = $1 AND uf.status = 'active'`,
 		token,
 	).Scan(
 		&file.ID,
@@ -136,7 +136,7 @@ func (r *Repository) FindActiveFileByShareToken(token string) (*SharedFile, erro
 
 func (r *Repository) ReserveDownload(token string) (bool, error) {
 	result, err := r.db.Exec(
-		`UPDATE file_shares SET download_count = download_count + 1 WHERE token = ? AND (expires_at IS NULL OR datetime(expires_at) > CURRENT_TIMESTAMP) AND (max_downloads IS NULL OR download_count < max_downloads)`,
+		`UPDATE file_shares SET download_count = download_count + 1 WHERE token = $1 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) AND (max_downloads IS NULL OR download_count < max_downloads)`,
 		token,
 	)
 	if err != nil {
@@ -153,7 +153,7 @@ func (r *Repository) ReserveDownload(token string) (bool, error) {
 
 func (r *Repository) ListByUser(userID int64) ([]Share, error) {
 	rows, err := r.db.Query(
-		`SELECT fs.token, fs.user_file_id, fs.password_hash, fs.expires_at, fs.max_downloads, fs.download_count, fs.created_at FROM file_shares AS fs JOIN user_files AS uf ON uf.id = fs.user_file_id WHERE uf.user_id = ? ORDER BY fs.created_at DESC`,
+		`SELECT fs.token, fs.user_file_id, fs.password_hash, fs.expires_at, fs.max_downloads, fs.download_count, fs.created_at FROM file_shares AS fs JOIN user_files AS uf ON uf.id = fs.user_file_id WHERE uf.user_id = $1 ORDER BY fs.created_at DESC`,
 		userID,
 	)
 	if err != nil {
@@ -181,7 +181,7 @@ func (r *Repository) ListByUser(userID int64) ([]Share, error) {
 
 func (r *Repository) DeleteByToken(userID int64, token string) error {
 	result, err := r.db.Exec(
-		`DELETE FROM file_shares WHERE token = ? AND EXISTS ( SELECT 1 FROM user_files WHERE user_files.id = file_shares.user_file_id AND user_files.user_id = ?)`,
+		`DELETE FROM file_shares WHERE token = $1 AND EXISTS ( SELECT 1 FROM user_files WHERE user_files.id = file_shares.user_file_id AND user_files.user_id = $2)`,
 		token,
 		userID,
 	)

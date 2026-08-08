@@ -6,6 +6,8 @@ func TestLoadUsesDefaults(t *testing.T) {
 	for _, name := range []string{
 		"HTTP_ADDR",
 		"DB_PATH",
+		"DATABASE_DRIVER",
+		"DATABASE_URL",
 		"UPLOAD_DIR",
 		"JWT_SECRET",
 		"USER_STORAGE_QUOTA_BYTES",
@@ -26,6 +28,12 @@ func TestLoadUsesDefaults(t *testing.T) {
 	}
 	if cfg.DBPath != "cloudbox.db" {
 		t.Fatalf("DB path = %q, want cloudbox.db", cfg.DBPath)
+	}
+	if cfg.DatabaseDriver != "sqlite" {
+		t.Fatalf("database driver = %q, want sqlite", cfg.DatabaseDriver)
+	}
+	if cfg.DatabaseURL != "" {
+		t.Fatalf("database URL = %q, want empty", cfg.DatabaseURL)
 	}
 	if cfg.UploadDir != "uploads" {
 		t.Fatalf("upload directory = %q, want uploads", cfg.UploadDir)
@@ -53,6 +61,8 @@ func TestLoadUsesDefaults(t *testing.T) {
 func TestLoadUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("HTTP_ADDR", "  :9090  ")
 	t.Setenv("DB_PATH", " /data/cloudbox.db ")
+	t.Setenv("DATABASE_DRIVER", " postgres ")
+	t.Setenv("DATABASE_URL", " postgres://cloudbox:password@db:5432/cloudbox?sslmode=disable ")
 	t.Setenv("UPLOAD_DIR", " /data/uploads ")
 	t.Setenv("JWT_SECRET", " production-secret ")
 	t.Setenv("USER_STORAGE_QUOTA_BYTES", "2048")
@@ -70,6 +80,12 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	}
 	if cfg.DBPath != "/data/cloudbox.db" {
 		t.Fatalf("DB path = %q, want /data/cloudbox.db", cfg.DBPath)
+	}
+	if cfg.DatabaseDriver != "postgres" {
+		t.Fatalf("database driver = %q, want postgres", cfg.DatabaseDriver)
+	}
+	if cfg.DatabaseURL != "postgres://cloudbox:password@db:5432/cloudbox?sslmode=disable" {
+		t.Fatalf("database URL = %q, want configured value", cfg.DatabaseURL)
 	}
 	if cfg.UploadDir != "/data/uploads" {
 		t.Fatalf("upload directory = %q, want /data/uploads", cfg.UploadDir)

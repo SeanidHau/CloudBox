@@ -19,6 +19,8 @@ type MinIOConfig struct {
 type Config struct {
 	HTTPAddr              string
 	DBPath                string
+	DatabaseDriver        string
+	DatabaseURL           string
 	UploadDir             string
 	JWTSecret             string
 	UserStorageQuotaBytes int64
@@ -28,8 +30,10 @@ type Config struct {
 
 func Load() Config {
 	return Config{
-		HTTPAddr: envOrDefault("HTTP_ADDR", ":8080"),
-		DBPath:   envOrDefault("DB_PATH", "cloudbox.db"),
+		HTTPAddr:       envOrDefault("HTTP_ADDR", ":8080"),
+		DBPath:         envOrDefault("DB_PATH", "cloudbox.db"),
+		DatabaseDriver: envOrDefault("DATABASE_DRIVER", "sqlite"),
+		DatabaseURL:    envOrDefault("DATABASE_URL", ""),
 		UploadDir: envOrDefault(
 			"UPLOAD_DIR",
 			"uploads",

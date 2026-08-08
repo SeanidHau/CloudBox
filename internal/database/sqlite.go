@@ -33,7 +33,7 @@ func Migrate(db *sql.DB, migrationPaths ...string) error {
 	if _, err := db.Exec(
 		`CREATE TABLE IF NOT EXISTS schema_migrations (
 			name TEXT PRIMARY KEY,
-			applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 			)
 		`); err != nil {
 		return err
@@ -44,7 +44,7 @@ func Migrate(db *sql.DB, migrationPaths ...string) error {
 
 		var applied bool
 		if err := db.QueryRow(
-			`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = ?)`,
+			`SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE name = $1)`,
 			migrationName,
 		).Scan(&applied); err != nil {
 			return err
@@ -70,7 +70,7 @@ func Migrate(db *sql.DB, migrationPaths ...string) error {
 		}
 
 		if _, err := tx.Exec(
-			`INSERT INTO schema_migrations (name) VALUES (?)`,
+			`INSERT INTO schema_migrations (name) VALUES ($1)`,
 			migrationName,
 		); err != nil {
 			_ = tx.Rollback()

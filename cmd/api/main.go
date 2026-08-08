@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -20,22 +21,42 @@ import (
 func main() {
 	cfg := config.Load()
 
-	db, err := database.Open(cfg.DBPath)
+	var (
+		db             *sql.DB
+		err            error
+		migrationPaths []string
+	)
+
+	// Each database backend uses migrations written for its SQL dialect.
+	switch cfg.DatabaseDriver {
+	case "sqlite":
+		db, err = database.Open(cfg.DBPath)
+		migrationPaths = []string{
+			"migrations/001_init.sql",
+			"migrations/002_file_objects.sql",
+			"migrations/003_upload_tasks.sql",
+			"migrations/004_fix_upload_chunks.sql",
+			"migrations/005_folders.sql",
+			"migrations/006_upload_task_parent.sql",
+			"migrations/007_file_shares.sql",
+		}
+
+	case "postgres":
+		db, err = database.OpenPostgres(cfg.DatabaseURL)
+		migrationPaths = []string{
+			"migrations/postgres/001_init.sql",
+		}
+
+	default:
+		log.Fatalf("unsupported database driver: %s", cfg.DatabaseDriver)
+	}
+
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
 
-	if err := database.Migrate(
-		db,
-		"migrations/001_init.sql",
-		"migrations/002_file_objects.sql",
-		"migrations/003_upload_tasks.sql",
-		"migrations/004_fix_upload_chunks.sql",
-		"migrations/005_folders.sql",
-		"migrations/006_upload_task_parent.sql",
-		"migrations/007_file_shares.sql",
-	); err != nil {
+	if err := database.Migrate(db, migrationPaths...); err != nil {
 		log.Fatal(err)
 	}
 

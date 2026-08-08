@@ -22,21 +22,18 @@ func NewRepository(db *sql.DB) *Repository {
 }
 
 func (r *Repository) Create(userID int64, originalName string, storagePath string, size int64, contentType string) (*UserFile, error) {
-	result, err := r.db.Exec(
-		`INSERT INTO user_files (user_id, original_name, storage_path, size, content_type, status) VALUES (?, ?, ?, ?, ?, ?)`,
+	var id int64
+
+	err := r.db.QueryRow(
+		`INSERT INTO user_files (user_id, original_name, storage_path, size, content_type, status) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
 		userID,
 		originalName,
 		storagePath,
 		size,
 		contentType,
 		StatusActive,
-	)
+	).Scan(&id)
 
-	if err != nil {
-		return nil, err
-	}
-
-	id, err := result.LastInsertId()
 	if err != nil {
 		return nil, err
 	}
@@ -67,13 +64,13 @@ func (r *Repository) ListActiveInFolder(
 
 	if parentID == nil {
 		rows, err = r.db.Query(
-			`SELECT id, user_id, parent_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE user_id = ? AND status = ? AND parent_id IS NULL ORDER BY created_at DESC`,
+			`SELECT id, user_id, parent_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE user_id = $1 AND status = $2 AND parent_id IS NULL ORDER BY created_at DESC`,
 			userID,
 			StatusActive,
 		)
 	} else {
 		rows, err = r.db.Query(
-			`SELECT id, user_id, parent_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE user_id = ? AND status = ? AND parent_id = ? ORDER BY created_at DESC`,
+			`SELECT id, user_id, parent_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE user_id = $1 AND status = $2 AND parent_id = $3 ORDER BY created_at DESC`,
 			userID,
 			StatusActive,
 			*parentID,
@@ -107,7 +104,7 @@ func (r *Repository) ListDeleted(userID int64) ([]UserFile, error) {
 
 func (r *Repository) SoftDelete(userID int64, fileID int64) error {
 	result, err := r.db.Exec(
-		`UPDATE user_files SET status = ?, deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND status = ?`,
+		`UPDATE user_files SET status = $1, deleted_at = CURRENT_TIMESTAMP WHERE id = $2 AND user_id = $3 AND status = $4`,
 		StatusDeleted,
 		fileID,
 		userID,
@@ -132,7 +129,7 @@ func (r *Repository) SoftDelete(userID int64, fileID int64) error {
 
 func (r *Repository) Restore(userID int64, fileID int64) error {
 	result, err := r.db.Exec(
-		`UPDATE user_files SET status = ?, deleted_at = NULL WHERE id = ? AND user_id = ? AND status = ?`,
+		`UPDATE user_files SET status = $1, deleted_at = NULL WHERE id = $2 AND user_id = $3 AND status = $4`,
 		StatusActive,
 		fileID,
 		userID,
@@ -157,7 +154,7 @@ func (r *Repository) Restore(userID int64, fileID int64) error {
 
 func (r *Repository) findByIDAndStatus(userID int64, fileID int64, status string) (*UserFile, error) {
 	row := r.db.QueryRow(
-		`SELECT id, user_id, parent_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE id = ? AND user_id = ? AND status = ?`,
+		`SELECT id, user_id, parent_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE id = $1 AND user_id = $2 AND status = $3`,
 		fileID,
 		userID,
 		status,
@@ -176,7 +173,7 @@ func (r *Repository) findByIDAndStatus(userID int64, fileID int64, status string
 
 func (r *Repository) listByStatus(userID int64, status string) ([]UserFile, error) {
 	rows, err := r.db.Query(
-		`SELECT id, user_id, parent_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE user_id = ? AND status = ? ORDER BY created_at DESC`,
+		`SELECT id, user_id, parent_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE user_id = $1 AND status = $2 ORDER BY created_at DESC`,
 		userID,
 		status,
 	)
@@ -243,7 +240,7 @@ func (r *Repository) CreateFileObject(
 	contentType string,
 ) (*FileObject, error) {
 	_, err := r.db.Exec(
-		`INSERT INTO file_objects (file_hash, storage_path, size, content_type, reference_count) VALUES (?, ?, ?, ?, 0)`,
+		`INSERT INTO file_objects (file_hash, storage_path, size, content_type, reference_count) VALUES ($1, $2, $3, $4, 0)`,
 		fileHash,
 		storagePath,
 		size,
@@ -260,7 +257,7 @@ func (r *Repository) FindFileObjectByHash(fileHash string) (*FileObject, error) 
 	var object FileObject
 
 	err := r.db.QueryRow(
-		`SELECT id, file_hash, storage_path, size, content_type, reference_count, created_at FROM file_objects WHERE file_hash = ?`,
+		`SELECT id, file_hash, storage_path, size, content_type, reference_count, created_at FROM file_objects WHERE file_hash = $1`,
 		fileHash,
 	).Scan(
 		&object.ID,
@@ -307,8 +304,10 @@ func (r *Repository) CreateWithObjectInFolder(
 		return nil, err
 	}
 
-	result, err := tx.Exec(
-		`INSERT INTO user_files (user_id, parent_id, object_id, original_name, storage_path, size, content_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	var fileID int64
+
+	err = tx.QueryRow(
+		`INSERT INTO user_files (user_id, parent_id, object_id, original_name, storage_path, size, content_type, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
 		userID,
 		parentID,
 		object.ID,
@@ -317,14 +316,14 @@ func (r *Repository) CreateWithObjectInFolder(
 		object.Size,
 		object.ContentType,
 		StatusActive,
-	)
+	).Scan(&fileID)
 	if err != nil {
 		_ = tx.Rollback()
 		return nil, err
 	}
 
 	updateResult, err := tx.Exec(
-		`UPDATE file_objects SET reference_count = reference_count + 1 WHERE id = ?`,
+		`UPDATE file_objects SET reference_count = reference_count + 1 WHERE id = $1`,
 		object.ID,
 	)
 
@@ -347,11 +346,6 @@ func (r *Repository) CreateWithObjectInFolder(
 		return nil, err
 	}
 
-	fileID, err := result.LastInsertId()
-	if err != nil {
-		return nil, err
-	}
-
 	return r.FindActiveByID(userID, fileID)
 }
 
@@ -360,22 +354,19 @@ func (r *Repository) CreateFolder(
 	parentID *int64,
 	name string,
 ) (*Folder, error) {
-	result, err := r.db.Exec(
-		`INSERT INTO folders (user_id, parent_id, name) VALUES (?, ?, ?)`,
+	var folderID int64
+
+	err := r.db.QueryRow(
+		`INSERT INTO folders (user_id, parent_id, name) VALUES ($1, $2, $3) RETURNING id`,
 		userID,
 		parentID,
 		name,
-	)
+	).Scan(&folderID)
 	if err != nil {
 		return nil, err
 	}
 
-	folderId, err := result.LastInsertId()
-	if err != nil {
-		return nil, err
-	}
-
-	return r.FindFolderByID(userID, folderId)
+	return r.FindFolderByID(userID, folderID)
 }
 
 func (r *Repository) FindFolderByID(
@@ -383,7 +374,7 @@ func (r *Repository) FindFolderByID(
 	folderID int64,
 ) (*Folder, error) {
 	row := r.db.QueryRow(
-		`SELECT id, user_id, parent_id, name, created_at, updated_at FROM folders WHERE id = ? AND user_id = ?`,
+		`SELECT id, user_id, parent_id, name, created_at, updated_at FROM folders WHERE id = $1 AND user_id = $2`,
 		folderID,
 		userID,
 	)
@@ -402,12 +393,12 @@ func (r *Repository) ListFolders(
 
 	if parentID == nil {
 		rows, err = r.db.Query(
-			`SELECT id, user_id, parent_id, name, created_at, updated_at FROM folders WHERE user_id = ? AND parent_id IS NULL ORDER BY name COLLATE NOCASE, id`,
+			`SELECT id, user_id, parent_id, name, created_at, updated_at FROM folders WHERE user_id = $1 AND parent_id IS NULL ORDER BY lower(name), id`,
 			userID,
 		)
 	} else {
 		rows, err = r.db.Query(
-			`SELECT id, user_id, parent_id, name, created_at, updated_at FROM folders WHERE user_id = ? AND parent_id = ? ORDER BY name COLLATE NOCASE, id`,
+			`SELECT id, user_id, parent_id, name, created_at, updated_at FROM folders WHERE user_id = $1 AND parent_id = $2 ORDER BY lower(name), id`,
 			userID,
 			*parentID,
 		)
@@ -473,7 +464,7 @@ func (r *Repository) MoveActive(
 	parentID *int64,
 ) (*UserFile, error) {
 	result, err := r.db.Exec(
-		`UPDATE user_files SET parent_id = ? WHERE id = ? AND user_id = ? AND status = ?`,
+		`UPDATE user_files SET parent_id = $1 WHERE id = $2 AND user_id = $3 AND status = $4`,
 		parentID,
 		fileID,
 		userID,
@@ -500,7 +491,7 @@ func (r *Repository) RenameActive(
 	originalName string,
 ) (*UserFile, error) {
 	result, err := r.db.Exec(
-		`UPDATE user_files SET original_name = ? WHERE id = ? AND user_id = ? AND status = ?`,
+		`UPDATE user_files SET original_name = $1 WHERE id = $2 AND user_id = $3 AND status = $4`,
 		originalName,
 		fileID,
 		userID,
@@ -527,7 +518,7 @@ func (r *Repository) RenameFolder(
 	name string,
 ) (*Folder, error) {
 	result, err := r.db.Exec(
-		`UPDATE folders SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`,
+		`UPDATE folders SET name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND user_id = $3`,
 		name,
 		folderID,
 		userID,
@@ -553,7 +544,7 @@ func (r *Repository) MoveFolder(
 	parentID *int64,
 ) (*Folder, error) {
 	result, err := r.db.Exec(
-		`UPDATE folders SET parent_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`,
+		`UPDATE folders SET parent_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND user_id = $3`,
 		parentID,
 		folderID,
 		userID,
@@ -578,7 +569,7 @@ func (r *Repository) DeleteEmptyFolder(
 	folderID int64,
 ) (bool, error) {
 	result, err := r.db.Exec(
-		`DELETE FROM folders WHERE id = ? AND user_id = ? AND NOT EXISTS (SELECT 1 FROM folders AS child WHERE child.user_id = ? AND child.parent_id = ?) AND NOT EXISTS (SELECT 1 FROM user_files WHERE user_id = ? AND parent_id = ?)`,
+		`DELETE FROM folders WHERE id = $1 AND user_id = $2 AND NOT EXISTS (SELECT 1 FROM folders AS child WHERE child.user_id = $3 AND child.parent_id = $4) AND NOT EXISTS (SELECT 1 FROM user_files WHERE user_id = $5 AND parent_id = $6)`,
 		folderID,
 		userID,
 		userID,
@@ -602,7 +593,7 @@ func (r *Repository) TotalFileSizeByUser(userID int64) (int64, error) {
 	var total int64
 
 	err := r.db.QueryRow(
-		`SELECT COALESCE(SUM(size), 0) FROM user_files WHERE user_id = ?`,
+		`SELECT COALESCE(SUM(size), 0) FROM user_files WHERE user_id = $1`,
 		userID,
 	).Scan(&total)
 	if err != nil {

@@ -16,16 +16,13 @@ func NewRepository(db *sql.DB) *Repository {
 }
 
 func (r *Repository) Create(username string, passwordHash string) (*User, error) {
-	result, err := r.db.Exec(
-		`INSERT INTO users (username, password_hash) VALUES (?, ?)`,
+	var id int64
+
+	err := r.db.QueryRow(
+		`INSERT INTO users (username, password_hash) VALUES ($1, $2) RETURNING id`,
 		username,
 		passwordHash,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	id, err := result.LastInsertId()
+	).Scan(&id)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +34,7 @@ func (r *Repository) FindByUsername(username string) (*User, error) {
 	var user User
 
 	err := r.db.QueryRow(
-		`SELECT id, username, password_hash, created_at FROM users WHERE username = ?`,
+		`SELECT id, username, password_hash, created_at FROM users WHERE username = $1`,
 		username,
 	).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.CreatedAt)
 
@@ -56,7 +53,7 @@ func (r *Repository) FindByID(id int64) (*User, error) {
 	var user User
 
 	err := r.db.QueryRow(
-		`SELECT id, username, password_hash, created_at FROM users WHERE id = ?`,
+		`SELECT id, username, password_hash, created_at FROM users WHERE id = $1`,
 		id,
 	).Scan(&user.ID, &user.Username, &user.PasswordHash, &user.CreatedAt)
 

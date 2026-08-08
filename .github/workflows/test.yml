@@ -28,6 +28,20 @@ jobs:
           --health-timeout 5s
           --health-retries 20
 
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cloudbox
+          POSTGRES_PASSWORD: cloudbox-test-password
+          POSTGRES_DB: cloudbox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cloudbox -d cloudbox"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -59,6 +73,11 @@ jobs:
           MINIO_INTEGRATION_SECRET_KEY: minioadmin
           MINIO_INTEGRATION_BUCKET: cloudbox
         run: go test -tags=integration ./internal/storage
+
+      - name: Test PostgreSQL migration integration
+        env:
+          POSTGRES_INTEGRATION_URL: postgres://cloudbox:cloudbox-test-password@localhost:5432/cloudbox?sslmode=disable
+        run: go test -tags=integration ./internal/database
 
       - name: Build Docker image
         run: docker build --tag cloudbox:ci .
