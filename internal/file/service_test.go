@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SeanidHau/CloudBox/internal/database"
 )
@@ -22,6 +23,17 @@ type fakeStorage struct {
 
 type fakeReadSeekCloser struct {
 	*strings.Reader
+}
+
+type fakeStorageUsageCache struct {
+	values      map[int64]int64
+	getErr      error
+	setErr      error
+	deleteErr   error
+	getCalls    int
+	setCalls    int
+	deleteCalls int
+	lastTTL     time.Duration
 }
 
 const testStorageQuotaBytes int64 = 1 << 30
@@ -66,11 +78,54 @@ func (s *fakeStorage) Delete(storagePath string) error {
 	return nil
 }
 
+func (c *fakeStorageUsageCache) Get(userID int64) (int64, bool, error) {
+	c.getCalls++
+	if c.getErr != nil {
+		return 0, false, c.getErr
+	}
+
+	usedBytes, found := c.values[userID]
+	return usedBytes, found, nil
+}
+
+func (c *fakeStorageUsageCache) Set(userID int64, usedBytes int64, ttl time.Duration) error {
+	c.setCalls++
+	c.lastTTL = ttl
+	if c.setErr != nil {
+		return c.setErr
+	}
+	if c.values == nil {
+		c.values = make(map[int64]int64)
+	}
+
+	c.values[userID] = usedBytes
+	return nil
+}
+
+func (c *fakeStorageUsageCache) Delete(userID int64) error {
+	c.deleteCalls++
+	if c.deleteErr != nil {
+		return c.deleteErr
+	}
+
+	delete(c.values, userID)
+	return nil
+}
+
 func newTestServiceWithStorage(t *testing.T, storage Storage) *Service {
 	return newTestServiceWithStorageQuota(t, storage, testStorageQuotaBytes)
 }
 
 func newTestServiceWithStorageQuota(t *testing.T, storage Storage, quotaBytes int64) *Service {
+	return newTestServiceWithStorageQuotaAndOptions(t, storage, quotaBytes)
+}
+
+func newTestServiceWithStorageQuotaAndOptions(
+	t *testing.T,
+	storage Storage,
+	quotaBytes int64,
+	options ...ServiceOption,
+) *Service {
 	t.Helper()
 
 	db, err := database.Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
@@ -97,7 +152,7 @@ func newTestServiceWithStorageQuota(t *testing.T, storage Storage, quotaBytes in
 		t.Fatalf("insert user 2: %v", err)
 	}
 
-	return NewService(NewRepository(db), storage, quotaBytes)
+	return NewService(NewRepository(db), storage, quotaBytes, options...)
 }
 
 func TestServiceUploadAndOpenForDownload(t *testing.T) {
@@ -163,6 +218,110 @@ func TestServiceGetStorageUsage(t *testing.T) {
 	}
 	if usage.AvailableBytes != testStorageQuotaBytes-11 {
 		t.Fatalf("available bytes = %d, want %d", usage.AvailableBytes, testStorageQuotaBytes-11)
+	}
+}
+
+func TestServiceGetStorageUsageUsesCache(t *testing.T) {
+	cache := &fakeStorageUsageCache{
+		values: map[int64]int64{1: 123},
+	}
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		&fakeStorage{},
+		testStorageQuotaBytes,
+		WithStorageUsageCache(cache, time.Minute),
+	)
+
+	usage, err := service.GetStorageUsage(1)
+	if err != nil {
+		t.Fatalf("get storage usage: %v", err)
+	}
+	if usage.UsedBytes != 123 {
+		t.Fatalf("used bytes = %d, want cached value 123", usage.UsedBytes)
+	}
+	if cache.getCalls != 1 || cache.setCalls != 0 {
+		t.Fatalf("cache calls = get %d, set %d, want get 1 and set 0", cache.getCalls, cache.setCalls)
+	}
+}
+
+func TestServiceGetStorageUsageFallsBackToDatabase(t *testing.T) {
+	cache := &fakeStorageUsageCache{
+		getErr: errors.New("Redis is unavailable"),
+	}
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		&fakeStorage{},
+		testStorageQuotaBytes,
+		WithStorageUsageCache(cache, 2*time.Minute),
+	)
+
+	if _, err := service.Upload(1, "report.txt", "text/plain", strings.NewReader("report")); err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+
+	usage, err := service.GetStorageUsage(1)
+	if err != nil {
+		t.Fatalf("get storage usage: %v", err)
+	}
+	if usage.UsedBytes != int64(len("report")) {
+		t.Fatalf("used bytes = %d, want %d", usage.UsedBytes, len("report"))
+	}
+	if cache.setCalls != 1 || cache.lastTTL != 2*time.Minute {
+		t.Fatalf("cache set = %d with TTL %s, want once with TTL 2m0s", cache.setCalls, cache.lastTTL)
+	}
+}
+
+func TestServiceUploadsInvalidateStorageUsageCache(t *testing.T) {
+	cache := &fakeStorageUsageCache{
+		values: map[int64]int64{1: 0},
+	}
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		&fakeStorage{},
+		testStorageQuotaBytes,
+		WithStorageUsageCache(cache, time.Minute),
+	)
+
+	if _, err := service.Upload(1, "first.txt", "text/plain", strings.NewReader("content")); err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	if cache.deleteCalls != 1 {
+		t.Fatalf("cache delete calls after upload = %d, want 1", cache.deleteCalls)
+	}
+
+	object, err := service.repo.CreateFileObject("instant-cache-hash", "uploads/shared.txt", 1, "text/plain")
+	if err != nil {
+		t.Fatalf("create instant upload object: %v", err)
+	}
+	if _, err := service.InstantUpload(1, "copy.txt", object.FileHash); err != nil {
+		t.Fatalf("instant upload: %v", err)
+	}
+	if cache.deleteCalls != 2 {
+		t.Fatalf("cache delete calls after instant upload = %d, want 2", cache.deleteCalls)
+	}
+}
+
+func TestServiceEnsureStorageQuotaUsesDatabaseInsteadOfCache(t *testing.T) {
+	cache := &fakeStorageUsageCache{
+		values: map[int64]int64{1: 0},
+	}
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		&fakeStorage{},
+		5,
+		WithStorageUsageCache(cache, time.Minute),
+	)
+
+	object, err := service.repo.CreateFileObject("quota-cache-hash", "uploads/full.txt", 5, "text/plain")
+	if err != nil {
+		t.Fatalf("create file object: %v", err)
+	}
+	if _, err := service.repo.CreateWithObject(1, "full.txt", object); err != nil {
+		t.Fatalf("create user file: %v", err)
+	}
+
+	if err := service.EnsureStorageQuota(1, 1); !errors.Is(err, ErrStorageQuotaExceeded) {
+		t.Fatalf("storage quota error = %v, want %v", err, ErrStorageQuotaExceeded)
 	}
 }
 

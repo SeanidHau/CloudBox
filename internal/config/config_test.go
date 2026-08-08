@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLoadUsesDefaults(t *testing.T) {
 	for _, name := range []string{
@@ -17,6 +20,11 @@ func TestLoadUsesDefaults(t *testing.T) {
 		"MINIO_SECRET_KEY",
 		"MINIO_BUCKET",
 		"MINIO_USE_SSL",
+		"REDIS_ENABLED",
+		"REDIS_ADDR",
+		"REDIS_PASSWORD",
+		"REDIS_DB",
+		"REDIS_USAGE_CACHE_TTL_SECONDS",
 	} {
 		t.Setenv(name, "")
 	}
@@ -56,6 +64,18 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if cfg.MinIO.UseSSL {
 		t.Fatal("MinIO SSL should default to false")
 	}
+	if cfg.Redis.Enabled {
+		t.Fatal("Redis should default to disabled")
+	}
+	if cfg.Redis.Addr != "localhost:6379" {
+		t.Fatalf("Redis address = %q, want localhost:6379", cfg.Redis.Addr)
+	}
+	if cfg.Redis.DB != 0 {
+		t.Fatalf("Redis DB = %d, want 0", cfg.Redis.DB)
+	}
+	if cfg.Redis.UsageCacheTTL != DefaultRedisUsageCacheTTL {
+		t.Fatalf("Redis usage cache TTL = %s, want %s", cfg.Redis.UsageCacheTTL, DefaultRedisUsageCacheTTL)
+	}
 }
 
 func TestLoadUsesEnvironmentValues(t *testing.T) {
@@ -72,6 +92,11 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("MINIO_SECRET_KEY", " minio-password ")
 	t.Setenv("MINIO_BUCKET", " cloudbox-files ")
 	t.Setenv("MINIO_USE_SSL", "true")
+	t.Setenv("REDIS_ENABLED", "true")
+	t.Setenv("REDIS_ADDR", " redis:6379 ")
+	t.Setenv("REDIS_PASSWORD", " redis-password ")
+	t.Setenv("REDIS_DB", "2")
+	t.Setenv("REDIS_USAGE_CACHE_TTL_SECONDS", "120")
 
 	cfg := Load()
 
@@ -111,6 +136,18 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	if !cfg.MinIO.UseSSL {
 		t.Fatal("MinIO SSL = false, want true")
 	}
+	if !cfg.Redis.Enabled {
+		t.Fatal("Redis enabled = false, want true")
+	}
+	if cfg.Redis.Addr != "redis:6379" || cfg.Redis.Password != "redis-password" {
+		t.Fatalf("Redis connection = %#v, want configured values", cfg.Redis)
+	}
+	if cfg.Redis.DB != 2 {
+		t.Fatalf("Redis DB = %d, want 2", cfg.Redis.DB)
+	}
+	if cfg.Redis.UsageCacheTTL != 2*time.Minute {
+		t.Fatalf("Redis usage cache TTL = %s, want 2m0s", cfg.Redis.UsageCacheTTL)
+	}
 }
 
 func TestLoadFallsBackForInvalidMinIOUseSSL(t *testing.T) {
@@ -130,6 +167,32 @@ func TestLoadFallsBackForInvalidQuota(t *testing.T) {
 			cfg := Load()
 			if cfg.UserStorageQuotaBytes != DefaultUserStorageQuotaBytes {
 				t.Fatalf("quota for %q = %d, want %d", value, cfg.UserStorageQuotaBytes, DefaultUserStorageQuotaBytes)
+			}
+		})
+	}
+}
+
+func TestLoadFallsBackForInvalidRedisDB(t *testing.T) {
+	for _, value := range []string{"not-a-number", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("REDIS_DB", value)
+
+			cfg := Load()
+			if cfg.Redis.DB != 0 {
+				t.Fatalf("Redis DB for %q = %d, want 0", value, cfg.Redis.DB)
+			}
+		})
+	}
+}
+
+func TestLoadFallsBackForInvalidRedisUsageCacheTTL(t *testing.T) {
+	for _, value := range []string{"not-a-number", "0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("REDIS_USAGE_CACHE_TTL_SECONDS", value)
+
+			cfg := Load()
+			if cfg.Redis.UsageCacheTTL != DefaultRedisUsageCacheTTL {
+				t.Fatalf("Redis usage cache TTL for %q = %s, want %s", value, cfg.Redis.UsageCacheTTL, DefaultRedisUsageCacheTTL)
 			}
 		})
 	}

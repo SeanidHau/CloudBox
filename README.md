@@ -31,10 +31,12 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] 真实 HTTP 端到端验证：初始化、三块上传、合并、下载校验
 - [x] 可切换的对象存储：本地磁盘或 MinIO
 - [x] MinIO Docker Compose 覆盖配置与对象存储集成测试
+- [x] SQLite 与 PostgreSQL 可切换的数据访问和迁移
+- [x] Redis 用户存储用量缓存：TTL、上传失效和数据库回退
+- [x] Redis Docker Compose 覆盖配置与真实缓存生命周期验证
 
 ### 未完成
 
-- [ ] PostgreSQL 和 Redis 的生产化替换
 - [ ] 异步任务，例如缩略图、病毒扫描和失败重试
 - [ ] 指标、结构化日志和链路追踪
 - [ ] Web 前端
@@ -43,7 +45,8 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 
 - Go
 - Gin
-- SQLite
+- SQLite 或 PostgreSQL
+- Redis（可选的存储用量缓存）
 - JWT + bcrypt
 - 本地磁盘存储或 MinIO 对象存储
 - SHA-256
@@ -56,10 +59,9 @@ HTTP 请求
 Handler      解析请求、返回状态码和 JSON
     |
 Service      执行业务规则、权限边界和文件流程
-    |
-Repository   访问 SQLite
-    |
-Storage      保存、打开和删除本地文件或对象存储对象
+    |-- Repository   访问 SQLite 或 PostgreSQL
+    |-- Storage      保存、打开和删除本地文件或对象存储对象
+    `-- Cache        可选地读取 Redis 存储用量缓存
 ```
 
 主要目录：
@@ -67,11 +69,12 @@ Storage      保存、打开和删除本地文件或对象存储对象
 ```text
 cmd/api/             API 入口和路由组装
 internal/auth/       注册、登录与 JWT
+internal/cache/      Redis 缓存适配器
 internal/file/       用户文件、去重和下载
 internal/share/      分享链接、公开下载和撤销
 internal/upload/     上传任务、分片、进度和合并
 internal/storage/    本地磁盘和 MinIO 对象存储
-internal/database/   SQLite 和版本化迁移
+internal/database/   SQLite、PostgreSQL 和版本化迁移
 migrations/          数据库迁移 SQL
 docs/                学习设计和历史计划
 ```
@@ -133,12 +136,50 @@ MinIO S3 API 地址为 `http://localhost:9000`，管理控制台为 `http://loca
 docker compose up --build -d
 ```
 
+### 使用 PostgreSQL
+
+PostgreSQL 模式通过 `compose.postgres.yaml` 覆盖数据库配置。先在 `.env` 中设置 `JWT_SECRET`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 和 `POSTGRES_DB`，再启动：
+
+```bash
+docker compose -f compose.yaml -f compose.postgres.yaml up --build -d
+docker compose -f compose.yaml -f compose.postgres.yaml ps
+curl http://localhost:8080/health
+```
+
+应用会自动执行 `migrations/postgres/001_init.sql`。PostgreSQL 数据保存在命名 volume `postgres-data` 中。
+
+### 使用 Redis
+
+Redis 只缓存 `GET /api/storage` 的用户已用空间，数据库仍是配额判断和数据查询的最终来源。Redis 未命中、缓存内容异常或 Redis 暂时不可用时，接口会回退数据库查询。
+
+先在 `.env` 中设置 `JWT_SECRET` 和 `REDIS_PASSWORD`，再启动：
+
+```bash
+docker compose -f compose.yaml -f compose.redis.yaml up --build -d
+docker compose -f compose.yaml -f compose.redis.yaml ps
+curl http://localhost:8080/health
+```
+
+Redis 不开放宿主机端口，仅供 Docker 网络内的 API 服务访问。它被限制为最多 `128 MiB` 内存和 `0.50` CPU，且不持久化缓存数据。上传或秒传成功后会删除对应用户的旧缓存；下一次空间查询会重新从数据库计算并缓存。
+
+需要同时使用 PostgreSQL 和 Redis 时，叠加两个覆盖文件：
+
+```bash
+docker compose \
+  -f compose.yaml \
+  -f compose.postgres.yaml \
+  -f compose.redis.yaml \
+  up --build -d
+```
+
 可用的环境变量：
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
 | `HTTP_ADDR` | `:8080` | HTTP 监听地址 |
 | `DB_PATH` | `cloudbox.db` | SQLite 数据库路径 |
+| `DATABASE_DRIVER` | `sqlite` | `sqlite` 或 `postgres` |
+| `DATABASE_URL` | 空 | PostgreSQL 连接 URL；`DATABASE_DRIVER=postgres` 时必填 |
 | `UPLOAD_DIR` | `uploads` | 文件和分片存储目录 |
 | `JWT_SECRET` | `dev-secret-change-me` | JWT 签名密钥 |
 | `USER_STORAGE_QUOTA_BYTES` | `1073741824` | 单用户逻辑存储配额 |
@@ -148,6 +189,11 @@ docker compose up --build -d
 | `MINIO_SECRET_KEY` | 空 | MinIO 密钥 |
 | `MINIO_BUCKET` | `cloudbox` | 保存文件对象的 bucket 名称 |
 | `MINIO_USE_SSL` | `false` | 是否使用 HTTPS 访问 MinIO |
+| `REDIS_ENABLED` | `false` | 是否启用 Redis 存储用量缓存 |
+| `REDIS_ADDR` | `localhost:6379` | Redis 地址 |
+| `REDIS_PASSWORD` | 空 | Redis 密码 |
+| `REDIS_DB` | `0` | Redis 逻辑数据库编号，不能为负数 |
+| `REDIS_USAGE_CACHE_TTL_SECONDS` | `60` | 存储用量缓存有效期，单位为秒 |
 
 ## API 一览
 
@@ -281,6 +327,8 @@ curl -X POST \
 - `defer` 如何在失败时恢复状态并清理临时文件
 - `crypto/rand`、bcrypt 和原子 SQL 更新如何支撑公开分享的安全边界
 - 接口如何让本地磁盘和 MinIO 在不改业务层代码的前提下互换
+- 数据库方言差异如何通过独立迁移和统一 Repository SQL 兼容
+- 缓存为何只用于查询加速，配额等限制性判断仍必须查询数据库
 
 ## 验证状态
 
@@ -291,6 +339,8 @@ curl -X POST \
 ```
 
 并已通过本地 HTTP 端到端验证：注册、登录、初始化上传、三块分片上传、状态查询、合并完成、下载内容比对。
+
+PostgreSQL 和 Redis Compose 覆盖配置也已完成端到端验证。Redis 验证覆盖空间统计缓存首次写入、上传后的缓存失效，以及后续查询重新写入缓存。
 
 MinIO 集成测试默认不运行，避免要求每个开发和 CI 环境都启动对象存储。启动 MinIO Compose 后，可显式运行：
 

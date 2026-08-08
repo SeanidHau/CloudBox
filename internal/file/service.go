@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"time"
 )
 
 var (
@@ -23,22 +24,52 @@ type Storage interface {
 	Delete(storagePath string) error
 }
 
+type StorageUsageCache interface {
+	Get(userID int64) (usedBytes int64, found bool, err error)
+	Set(userID int64, usedBytes int64, ttl time.Duration) error
+	Delete(userID int64) error
+}
+
+type ServiceOption func(*Service)
+
+func WithStorageUsageCache(cache StorageUsageCache, ttl time.Duration) ServiceOption {
+	return func(service *Service) {
+		if cache == nil || ttl <= 0 {
+			return
+		}
+
+		service.storageUsageCache = cache
+		service.storageUsageCacheTTL = ttl
+	}
+}
+
 type Service struct {
-	repo              *Repository
-	storage           Storage
-	storageQuotaBytes int64
+	repo                 *Repository
+	storage              Storage
+	storageQuotaBytes    int64
+	storageUsageCache    StorageUsageCache
+	storageUsageCacheTTL time.Duration
 }
 
 func NewService(
 	repo *Repository,
 	storage Storage,
 	storageQuotaBytes int64,
+	options ...ServiceOption,
 ) *Service {
-	return &Service{
+	service := &Service{
 		repo:              repo,
 		storage:           storage,
 		storageQuotaBytes: storageQuotaBytes,
 	}
+
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+
+	return service
 }
 
 func (s *Service) Upload(userID int64, originalName string, contentType string, reader io.Reader) (*UserFile, error) {
@@ -111,12 +142,19 @@ func (s *Service) UploadIntoFolder(
 		return nil, err
 	}
 
-	return s.repo.CreateWithObjectInFolder(
+	file, err := s.repo.CreateWithObjectInFolder(
 		userID,
 		parentID,
 		originalName,
 		object,
 	)
+	if err != nil {
+		return nil, err
+	}
+
+	s.invalidateStorageUsageCache(userID)
+
+	return file, nil
 }
 
 func (s *Service) ListActive(userID int64) ([]UserFile, error) {
@@ -197,7 +235,14 @@ func (s *Service) InstantUploadIntoFolder(
 		return nil, err
 	}
 
-	return s.repo.CreateWithObjectInFolder(userID, parentID, originalName, object)
+	file, err := s.repo.CreateWithObjectInFolder(userID, parentID, originalName, object)
+	if err != nil {
+		return nil, err
+	}
+
+	s.invalidateStorageUsageCache(userID)
+
+	return file, nil
 }
 
 func (s *Service) CreateFolder(
@@ -363,11 +408,26 @@ func (s *Service) DeleteFolder(userID int64, folderID int64) error {
 }
 
 func (s *Service) GetStorageUsage(userID int64) (*StorageUsage, error) {
+	if s.storageUsageCache != nil {
+		usedBytes, found, err := s.storageUsageCache.Get(userID)
+		if err == nil && found {
+			return s.newStorageUsage(usedBytes), nil
+		}
+	}
+
 	usedBytes, err := s.repo.TotalFileSizeByUser(userID)
 	if err != nil {
 		return nil, err
 	}
 
+	if s.storageUsageCache != nil {
+		_ = s.storageUsageCache.Set(userID, usedBytes, s.storageUsageCacheTTL)
+	}
+
+	return s.newStorageUsage(usedBytes), nil
+}
+
+func (s *Service) newStorageUsage(usedBytes int64) *StorageUsage {
 	availableBytes := s.storageQuotaBytes - usedBytes
 	if availableBytes < 0 {
 		availableBytes = 0
@@ -377,7 +437,13 @@ func (s *Service) GetStorageUsage(userID int64) (*StorageUsage, error) {
 		UsedBytes:      usedBytes,
 		QuotaBytes:     s.storageQuotaBytes,
 		AvailableBytes: availableBytes,
-	}, nil
+	}
+}
+
+func (s *Service) invalidateStorageUsageCache(userID int64) {
+	if s.storageUsageCache != nil {
+		_ = s.storageUsageCache.Delete(userID)
+	}
 }
 
 func (s *Service) EnsureStorageQuota(

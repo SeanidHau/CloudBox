@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/SeanidHau/CloudBox/internal/auth"
+	cachemodule "github.com/SeanidHau/CloudBox/internal/cache"
 	"github.com/SeanidHau/CloudBox/internal/config"
 	"github.com/SeanidHau/CloudBox/internal/database"
 	filemodule "github.com/SeanidHau/CloudBox/internal/file"
@@ -16,6 +18,7 @@ import (
 	"github.com/SeanidHau/CloudBox/internal/storage"
 	uploadmodule "github.com/SeanidHau/CloudBox/internal/upload"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -101,11 +104,39 @@ func main() {
 		log.Fatalf("unsupported storage driver: %s", cfg.StorageDriver)
 	}
 
+	var fileServiceOptions []filemodule.ServiceOption
+
+	if cfg.Redis.Enabled {
+		redisClient := redis.NewClient(&redis.Options{
+			Addr:     cfg.Redis.Addr,
+			Password: cfg.Redis.Password,
+			DB:       cfg.Redis.DB,
+		})
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := redisClient.Ping(ctx).Err(); err != nil {
+			_ = redisClient.Close()
+			log.Fatalf("connect redis: %v", err)
+		}
+		defer redisClient.Close()
+
+		fileServiceOptions = append(
+			fileServiceOptions,
+			filemodule.WithStorageUsageCache(
+				cachemodule.NewRedisStorageUsageCache(redisClient),
+				cfg.Redis.UsageCacheTTL,
+			),
+		)
+	}
+
 	filerepo := filemodule.NewRepository(db)
 	fileService := filemodule.NewService(
 		filerepo,
 		objectStorage,
 		cfg.UserStorageQuotaBytes,
+		fileServiceOptions...,
 	)
 	fileHandler := filemodule.NewHandler(fileService)
 

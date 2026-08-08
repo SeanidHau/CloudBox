@@ -4,9 +4,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
-const DefaultUserStorageQuotaBytes int64 = 1 << 30
+const (
+	DefaultUserStorageQuotaBytes int64 = 1 << 30
+	DefaultRedisUsageCacheTTL          = time.Minute
+)
 
 type MinIOConfig struct {
 	Endpoint  string
@@ -14,6 +18,14 @@ type MinIOConfig struct {
 	SecretKey string
 	Bucket    string
 	UseSSL    bool
+}
+
+type RedisConfig struct {
+	Enabled       bool
+	Addr          string
+	Password      string
+	DB            int
+	UsageCacheTTL time.Duration
 }
 
 type Config struct {
@@ -26,6 +38,7 @@ type Config struct {
 	UserStorageQuotaBytes int64
 	StorageDriver         string
 	MinIO                 MinIOConfig
+	Redis                 RedisConfig
 }
 
 func Load() Config {
@@ -53,6 +66,18 @@ func Load() Config {
 			SecretKey: envOrDefault("MINIO_SECRET_KEY", ""),
 			Bucket:    envOrDefault("MINIO_BUCKET", "cloudbox"),
 			UseSSL:    envBoolOrDefault("MINIO_USE_SSL", false),
+		},
+		Redis: RedisConfig{
+			Enabled: envBoolOrDefault("REDIS_ENABLED", false),
+			Addr:    envOrDefault("REDIS_ADDR", "localhost:6379"),
+			Password: envOrDefault(
+				"REDIS_PASSWORD",
+				"",
+			),
+			DB: envNonNegativeIntOrDefault("REDIS_DB", 0),
+			UsageCacheTTL: time.Duration(
+				envInt64OrDefault("REDIS_USAGE_CACHE_TTL_SECONDS", int64(DefaultRedisUsageCacheTTL/time.Second)),
+			) * time.Second,
 		},
 	}
 }
@@ -88,6 +113,20 @@ func envBoolOrDefault(name string, fallback bool) bool {
 
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
+		return fallback
+	}
+
+	return parsed
+}
+
+func envNonNegativeIntOrDefault(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
 		return fallback
 	}
 
