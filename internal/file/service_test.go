@@ -19,6 +19,7 @@ type fakeStorage struct {
 	deletedPath  string
 	saveErr      error
 	openErr      error
+	deleteErr    error
 }
 
 type fakeReadSeekCloser struct {
@@ -75,7 +76,7 @@ func (s *fakeStorage) Open(storagePath string) (io.ReadSeekCloser, error) {
 
 func (s *fakeStorage) Delete(storagePath string) error {
 	s.deletedPath = storagePath
-	return nil
+	return s.deleteErr
 }
 
 func (c *fakeStorageUsageCache) Get(userID int64) (int64, bool, error) {
@@ -141,6 +142,7 @@ func newTestServiceWithStorageQuotaAndOptions(
 		"../../migrations/001_init.sql",
 		"../../migrations/002_file_objects.sql",
 		"../../migrations/005_folders.sql",
+		"../../migrations/007_file_shares.sql",
 	); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
@@ -218,6 +220,59 @@ func TestServiceGetStorageUsage(t *testing.T) {
 	}
 	if usage.AvailableBytes != testStorageQuotaBytes-11 {
 		t.Fatalf("available bytes = %d, want %d", usage.AvailableBytes, testStorageQuotaBytes-11)
+	}
+}
+
+func TestServicePermanentlyDeleteRemovesLastObject(t *testing.T) {
+	storage := &fakeStorage{}
+	cache := &fakeStorageUsageCache{values: map[int64]int64{1: 7}}
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		storage,
+		testStorageQuotaBytes,
+		WithStorageUsageCache(cache, time.Minute),
+	)
+
+	file, err := service.Upload(1, "permanent.txt", "text/plain", strings.NewReader("content"))
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	if err := service.SoftDelete(1, file.ID); err != nil {
+		t.Fatalf("soft delete file: %v", err)
+	}
+
+	cache.deleteCalls = 0
+	if err := service.PermanentlyDelete(1, file.ID); err != nil {
+		t.Fatalf("permanently delete file: %v", err)
+	}
+	if storage.deletedPath != file.StoragePath {
+		t.Fatalf("deleted storage path = %q, want %q", storage.deletedPath, file.StoragePath)
+	}
+	if cache.deleteCalls != 1 {
+		t.Fatalf("cache delete calls = %d, want 1", cache.deleteCalls)
+	}
+	if _, err := service.repo.FindDeletedByID(1, file.ID); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("find permanently deleted file error = %v, want %v", err, ErrFileNotFound)
+	}
+}
+
+func TestServicePermanentlyDeleteSucceedsWhenStorageCleanupFails(t *testing.T) {
+	storage := &fakeStorage{deleteErr: errors.New("storage is unavailable")}
+	service := newTestServiceWithStorage(t, storage)
+
+	file, err := service.Upload(1, "cleanup-error.txt", "text/plain", strings.NewReader("content"))
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	if err := service.SoftDelete(1, file.ID); err != nil {
+		t.Fatalf("soft delete file: %v", err)
+	}
+
+	if err := service.PermanentlyDelete(1, file.ID); err != nil {
+		t.Fatalf("permanently delete file: %v", err)
+	}
+	if _, err := service.repo.FindDeletedByID(1, file.ID); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("find permanently deleted file error = %v, want %v", err, ErrFileNotFound)
 	}
 }
 

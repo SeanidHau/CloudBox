@@ -222,6 +222,32 @@ func (h *Handler) SoftDelete(c *gin.Context) {
 	})
 }
 
+func (h *Handler) PermanentlyDelete(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	fileID, err := parseFileID(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	if err := h.service.PermanentlyDelete(userID, fileID); err != nil {
+		if errors.Is(err, ErrFileNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+			return
+		}
+
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to permanently delete file"})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
 func (h *Handler) Restore(c *gin.Context) {
 	userID, ok := middleware.CurrentUserID(c)
 	if !ok {

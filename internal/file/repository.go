@@ -152,6 +152,105 @@ func (r *Repository) Restore(userID int64, fileID int64) error {
 	return nil
 }
 
+func (r *Repository) PermanentlyDeleteDeleted(
+	userID int64,
+	fileID int64,
+) (*FileObject, error) {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	var object FileObject
+	err = tx.QueryRow(
+		`SELECT fo.id, fo.file_hash, fo.storage_path, fo.size, fo.content_type, fo.reference_count, fo.created_at FROM user_files as uf JOIN file_objects AS fo ON fo.id = uf.object_id WHERE uf.id = $1 AND uf.user_id = $2 AND uf.status = $3`,
+		fileID,
+		userID,
+		StatusDeleted,
+	).Scan(
+		&object.ID,
+		&object.FileHash,
+		&object.StoragePath,
+		&object.Size,
+		&object.ContentType,
+		&object.ReferenceCount,
+		&object.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrFileNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := tx.Exec(`DELETE FROM file_shares WHERE user_file_id = $1`, fileID); err != nil {
+		return nil, err
+	}
+
+	result, err := tx.Exec(
+		`DELETE FROM user_files WHERE id = $1 AND user_id = $2 AND status = $3`,
+		fileID,
+		userID,
+		StatusDeleted,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected != 1 {
+		return nil, ErrFileNotFound
+	}
+
+	var remainingReferences int
+	err = tx.QueryRow(
+		`UPDATE file_objects SET reference_count = reference_count - 1 WHERE id = $1 AND reference_count > 0 RETURNING reference_count`,
+		object.ID,
+	).Scan(&remainingReferences)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrFileObjectNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if remainingReferences > 0 {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+
+		return nil, nil
+	}
+
+	result, err = tx.Exec(
+		`DELETE FROM file_objects WHERE id = $1 AND reference_count = 0`,
+		object.ID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	affected, err = result.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected != 1 {
+		return nil, ErrFileObjectNotFound
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return &object, nil
+}
+
 func (r *Repository) findByIDAndStatus(userID int64, fileID int64, status string) (*UserFile, error) {
 	row := r.db.QueryRow(
 		`SELECT id, user_id, parent_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE id = $1 AND user_id = $2 AND status = $3`,

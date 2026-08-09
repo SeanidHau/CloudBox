@@ -24,6 +24,7 @@ func newTestRepository(t *testing.T) *Repository {
 		"../../migrations/001_init.sql",
 		"../../migrations/002_file_objects.sql",
 		"../../migrations/005_folders.sql",
+		"../../migrations/007_file_shares.sql",
 	); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
@@ -97,6 +98,106 @@ func TestRepositoryCreateListSoftDeleteAndRestore(t *testing.T) {
 	}
 	if restored.Status != StatusActive {
 		t.Fatalf("restored status = %q, want %q", restored.Status, StatusActive)
+	}
+}
+
+func TestRepositoryPermanentlyDeleteDeletedFile(t *testing.T) {
+	repo := newTestRepository(t)
+
+	object, err := repo.CreateFileObject("permanent-delete-hash", "uploads/permanent.txt", 15, "text/plain")
+	if err != nil {
+		t.Fatalf("create file object: %v", err)
+	}
+	file, err := repo.CreateWithObject(1, "permanent.txt", object)
+	if err != nil {
+		t.Fatalf("create user file: %v", err)
+	}
+	if _, err := repo.db.Exec(`INSERT INTO file_shares (token, user_file_id) VALUES ($1, $2)`, "permanent-share", file.ID); err != nil {
+		t.Fatalf("create file share: %v", err)
+	}
+	if err := repo.SoftDelete(1, file.ID); err != nil {
+		t.Fatalf("soft delete file: %v", err)
+	}
+
+	objectToDelete, err := repo.PermanentlyDeleteDeleted(1, file.ID)
+	if err != nil {
+		t.Fatalf("permanently delete file: %v", err)
+	}
+	if objectToDelete == nil || objectToDelete.ID != object.ID {
+		t.Fatalf("object to delete = %#v, want object %d", objectToDelete, object.ID)
+	}
+	if _, err := repo.FindDeletedByID(1, file.ID); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("find permanently deleted file error = %v, want %v", err, ErrFileNotFound)
+	}
+	if _, err := repo.FindFileObjectByHash(object.FileHash); !errors.Is(err, ErrFileObjectNotFound) {
+		t.Fatalf("find deleted object error = %v, want %v", err, ErrFileObjectNotFound)
+	}
+
+	var shareCount int
+	if err := repo.db.QueryRow(`SELECT COUNT(*) FROM file_shares WHERE user_file_id = $1`, file.ID).Scan(&shareCount); err != nil {
+		t.Fatalf("count file shares: %v", err)
+	}
+	if shareCount != 0 {
+		t.Fatalf("share count = %d, want 0", shareCount)
+	}
+}
+
+func TestRepositoryPermanentlyDeleteKeepsSharedObject(t *testing.T) {
+	repo := newTestRepository(t)
+
+	object, err := repo.CreateFileObject("shared-permanent-delete-hash", "uploads/shared.txt", 15, "text/plain")
+	if err != nil {
+		t.Fatalf("create file object: %v", err)
+	}
+	first, err := repo.CreateWithObject(1, "first.txt", object)
+	if err != nil {
+		t.Fatalf("create first user file: %v", err)
+	}
+	second, err := repo.CreateWithObject(2, "second.txt", object)
+	if err != nil {
+		t.Fatalf("create second user file: %v", err)
+	}
+	if err := repo.SoftDelete(1, first.ID); err != nil {
+		t.Fatalf("soft delete first file: %v", err)
+	}
+
+	objectToDelete, err := repo.PermanentlyDeleteDeleted(1, first.ID)
+	if err != nil {
+		t.Fatalf("permanently delete first file: %v", err)
+	}
+	if objectToDelete != nil {
+		t.Fatalf("object to delete = %#v, want nil while another file references it", objectToDelete)
+	}
+
+	remainingObject, err := repo.FindFileObjectByHash(object.FileHash)
+	if err != nil {
+		t.Fatalf("find shared object: %v", err)
+	}
+	if remainingObject.ReferenceCount != 1 {
+		t.Fatalf("reference count = %d, want 1", remainingObject.ReferenceCount)
+	}
+	if _, err := repo.FindActiveByID(2, second.ID); err != nil {
+		t.Fatalf("find remaining user file: %v", err)
+	}
+}
+
+func TestRepositoryPermanentlyDeleteRequiresTrashFile(t *testing.T) {
+	repo := newTestRepository(t)
+
+	object, err := repo.CreateFileObject("active-permanent-delete-hash", "uploads/active.txt", 15, "text/plain")
+	if err != nil {
+		t.Fatalf("create file object: %v", err)
+	}
+	file, err := repo.CreateWithObject(1, "active.txt", object)
+	if err != nil {
+		t.Fatalf("create user file: %v", err)
+	}
+
+	if _, err := repo.PermanentlyDeleteDeleted(1, file.ID); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("permanently delete active file error = %v, want %v", err, ErrFileNotFound)
+	}
+	if _, err := repo.FindActiveByID(1, file.ID); err != nil {
+		t.Fatalf("find active file after rejected delete: %v", err)
 	}
 }
 

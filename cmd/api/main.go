@@ -80,6 +80,8 @@ func main() {
 		}),
 	)
 
+	slog.SetDefault(requestLogger)
+
 	r := gin.New()
 	r.Use(
 		middleware.RequestID(),
@@ -216,6 +218,7 @@ func main() {
 	protected.GET("/files", fileHandler.ListActive)
 	protected.GET("/files/trash", fileHandler.ListDeleted)
 	protected.GET("/files/:id/download", fileHandler.Download)
+	protected.DELETE("/files/:id/permanent", fileHandler.PermanentlyDelete)
 	protected.DELETE("/files/:id", fileHandler.SoftDelete)
 	protected.POST("/files/:id/restore", fileHandler.Restore)
 	protected.POST("/uploads/init", uploadHandler.Init)

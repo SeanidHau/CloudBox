@@ -3,6 +3,7 @@ package file
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -198,6 +199,31 @@ func (s *Service) SoftDelete(userID int64, fileID int64) error {
 
 func (s *Service) Restore(userID int64, fileID int64) error {
 	return s.repo.Restore(userID, fileID)
+}
+
+func (s *Service) PermanentlyDelete(userID int64, fileID int64) error {
+	object, err := s.repo.PermanentlyDeleteDeleted(userID, fileID)
+	if err != nil {
+		return err
+	}
+
+	s.invalidateStorageUsageCache(userID)
+
+	if object == nil {
+		return nil
+	}
+
+	if err := s.storage.Delete(object.StoragePath); err != nil {
+		slog.Error(
+			"delete unreferenced file object failed",
+			"object_id", object.ID,
+			"user_id", userID,
+			"storage_path", object.StoragePath,
+			"error", err,
+		)
+	}
+
+	return nil
 }
 
 func (s *Service) InstantUpload(userID int64, originalName string, fileHash string) (*UserFile, error) {

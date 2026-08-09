@@ -34,6 +34,7 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] SQLite 与 PostgreSQL 可切换的数据访问和迁移
 - [x] Redis 用户存储用量缓存：TTL、上传失效和数据库回退
 - [x] Redis Docker Compose 覆盖配置与真实缓存生命周期验证
+- [x] 回收站文件永久删除、分享链接清理和无引用去重对象回收
 
 ### 未完成
 
@@ -213,6 +214,7 @@ Authorization: Bearer <JWT>
 | 回收站 | `GET /api/files/trash` |
 | 下载或 Range 下载 | `GET /api/files/:id/download` |
 | 软删除 | `DELETE /api/files/:id` |
+| 永久删除回收站文件 | `DELETE /api/files/:id/permanent` |
 | 恢复文件 | `POST /api/files/:id/restore` |
 | 移动文件 | `PATCH /api/files/:id/move` |
 | 重命名文件 | `PATCH /api/files/:id/rename` |
@@ -259,6 +261,8 @@ POST /api/uploads/:id/complete
 默认每位用户的逻辑配额为 `1 GiB`。`GET /api/storage` 返回已用字节数、总配额和剩余空间。
 
 逻辑用量统计包含活跃文件和回收站文件，因为回收站文件仍可恢复；内容去重不会降低用户自身的逻辑占用。小文件上传、秒传与分片上传初始化/完成都会检查配额，超额返回 `409 Conflict`。
+
+文件进入回收站时仍计入逻辑用量；只有执行永久删除后才释放配额。永久删除会同时删除该文件的分享链接，并减少对应 `file_object` 的引用计数。引用计数归零时，系统会删除对象元数据并尽力清理实际存储对象；存储清理失败不会恢复已经完成的数据库删除，而会记录错误日志。
 
 ## 分享链接
 

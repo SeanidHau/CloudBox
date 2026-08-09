@@ -41,6 +41,7 @@ func newTestFileRouterWithQuota(t *testing.T, quotaBytes int64) (*gin.Engine, st
 	protected.GET("/files", handler.ListActive)
 	protected.GET("/files/trash", handler.ListDeleted)
 	protected.GET("/files/:id/download", handler.Download)
+	protected.DELETE("/files/:id/permanent", handler.PermanentlyDelete)
 	protected.DELETE("/files/:id", handler.SoftDelete)
 	protected.POST("/files/:id/restore", handler.Restore)
 	protected.PATCH("/files/:id/move", handler.MoveActive)
@@ -206,6 +207,89 @@ func TestFileHandlerLifecycle(t *testing.T) {
 	}
 	if len(activeFiles.Files) != 1 || activeFiles.Files[0].ID != uploaded.File.ID {
 		t.Fatalf("active files after restore = %#v, want uploaded file", activeFiles.Files)
+	}
+}
+
+func TestFileHandlerPermanentlyDelete(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "permanent.txt")
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := part.Write([]byte("permanent content")); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	uploadRequest := newAuthenticatedRequest(http.MethodPost, "/files", &body, token)
+	uploadRequest.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadResponse := httptest.NewRecorder()
+	router.ServeHTTP(uploadResponse, uploadRequest)
+	if uploadResponse.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, want %d: %s", uploadResponse.Code, http.StatusCreated, uploadResponse.Body.String())
+	}
+
+	var uploaded struct {
+		File UserFile `json:"file"`
+	}
+	if err := json.Unmarshal(uploadResponse.Body.Bytes(), &uploaded); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+
+	filePath := "/files/" + strconv.FormatInt(uploaded.File.ID, 10)
+
+	// 活跃文件尚可恢复，不能绕过回收站直接永久删除。
+	activeDeleteRequest := newAuthenticatedRequest(http.MethodDelete, filePath+"/permanent", nil, token)
+	activeDeleteResponse := httptest.NewRecorder()
+	router.ServeHTTP(activeDeleteResponse, activeDeleteRequest)
+	if activeDeleteResponse.Code != http.StatusNotFound {
+		t.Fatalf("active permanent delete status = %d, want %d", activeDeleteResponse.Code, http.StatusNotFound)
+	}
+
+	softDeleteRequest := newAuthenticatedRequest(http.MethodDelete, filePath, nil, token)
+	softDeleteResponse := httptest.NewRecorder()
+	router.ServeHTTP(softDeleteResponse, softDeleteRequest)
+	if softDeleteResponse.Code != http.StatusOK {
+		t.Fatalf("soft delete status = %d, want %d", softDeleteResponse.Code, http.StatusOK)
+	}
+
+	permanentDeleteRequest := newAuthenticatedRequest(http.MethodDelete, filePath+"/permanent", nil, token)
+	permanentDeleteResponse := httptest.NewRecorder()
+	router.ServeHTTP(permanentDeleteResponse, permanentDeleteRequest)
+	if permanentDeleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("permanent delete status = %d, want %d: %s", permanentDeleteResponse.Code, http.StatusNoContent, permanentDeleteResponse.Body.String())
+	}
+	if permanentDeleteResponse.Body.Len() != 0 {
+		t.Fatalf("permanent delete response body = %q, want empty", permanentDeleteResponse.Body.String())
+	}
+
+	trashRequest := newAuthenticatedRequest(http.MethodGet, "/files/trash", nil, token)
+	trashResponse := httptest.NewRecorder()
+	router.ServeHTTP(trashResponse, trashRequest)
+	if trashResponse.Code != http.StatusOK {
+		t.Fatalf("trash status = %d, want %d", trashResponse.Code, http.StatusOK)
+	}
+
+	var trash struct {
+		Files []UserFile `json:"files"`
+	}
+	if err := json.Unmarshal(trashResponse.Body.Bytes(), &trash); err != nil {
+		t.Fatalf("decode trash response: %v", err)
+	}
+	if len(trash.Files) != 0 {
+		t.Fatalf("trash files = %#v, want empty", trash.Files)
+	}
+
+	repeatDeleteRequest := newAuthenticatedRequest(http.MethodDelete, filePath+"/permanent", nil, token)
+	repeatDeleteResponse := httptest.NewRecorder()
+	router.ServeHTTP(repeatDeleteResponse, repeatDeleteRequest)
+	if repeatDeleteResponse.Code != http.StatusNotFound {
+		t.Fatalf("repeat permanent delete status = %d, want %d", repeatDeleteResponse.Code, http.StatusNotFound)
 	}
 }
 
