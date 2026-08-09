@@ -36,11 +36,13 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] Redis Docker Compose 覆盖配置与真实缓存生命周期验证
 - [x] 回收站文件永久删除、分享链接清理和无引用去重对象回收
 - [x] 可配置的回收站过期清理：启动时和每小时检查一次
+- [x] 请求 ID、JSON 结构化访问日志与可配置日志级别
+- [x] Prometheus HTTP 指标：请求数、耗时直方图和并发请求数
 
 ### 未完成
 
 - [ ] 异步任务，例如缩略图、病毒扫描和失败重试
-- [ ] 指标、结构化日志和链路追踪
+- [ ] 链路追踪
 - [ ] Web 前端
 
 ## 技术栈
@@ -49,6 +51,7 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - Gin
 - SQLite 或 PostgreSQL
 - Redis（可选的存储用量缓存）
+- Prometheus 指标
 - JWT + bcrypt
 - 本地磁盘存储或 MinIO 对象存储
 - SHA-256
@@ -72,6 +75,7 @@ Service      执行业务规则、权限边界和文件流程
 cmd/api/             API 入口和路由组装
 internal/auth/       注册、登录与 JWT
 internal/cache/      Redis 缓存适配器
+internal/metrics/    Prometheus HTTP 指标
 internal/file/       用户文件、去重和下载
 internal/share/      分享链接、公开下载和撤销
 internal/upload/     上传任务、分片、进度和合并
@@ -117,6 +121,18 @@ curl http://localhost:8080/health
 ```
 
 Compose 会把 SQLite 数据库和上传文件保存在命名 volume `cloudbox-data` 的 `/data` 目录。停止容器不会删除该 volume；查看服务日志可使用 `docker compose logs -f api`。
+
+## 指标
+
+`GET /metrics` 暴露 Prometheus 文本格式指标，目前不要求 JWT。生产环境应通过反向代理、网络策略或独立监听地址限制该路径的访问来源。
+
+HTTP 指标包含：
+
+- `cloudbox_http_requests_total`：按方法、路由模板和状态码统计的请求总数
+- `cloudbox_http_request_duration_seconds`：请求耗时直方图
+- `cloudbox_http_requests_in_flight`：当前正在处理的请求数
+
+路由标签使用例如 `/files/:id` 的模板路径，而不是实际文件 ID，避免产生过多指标时间序列。
 
 ### 使用 MinIO
 

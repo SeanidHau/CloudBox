@@ -15,11 +15,14 @@ import (
 	"github.com/SeanidHau/CloudBox/internal/config"
 	"github.com/SeanidHau/CloudBox/internal/database"
 	filemodule "github.com/SeanidHau/CloudBox/internal/file"
+	metricsmodule "github.com/SeanidHau/CloudBox/internal/metrics"
 	"github.com/SeanidHau/CloudBox/internal/middleware"
 	sharemodule "github.com/SeanidHau/CloudBox/internal/share"
 	"github.com/SeanidHau/CloudBox/internal/storage"
 	uploadmodule "github.com/SeanidHau/CloudBox/internal/upload"
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -82,10 +85,13 @@ func main() {
 
 	slog.SetDefault(requestLogger)
 
+	httpMetrics := metricsmodule.NewHTTPMetrics(prometheus.DefaultRegisterer)
+
 	r := gin.New()
 	r.Use(
 		middleware.RequestID(),
 		middleware.RequestLogger(requestLogger),
+		httpMetrics.Middleware(),
 		gin.Recovery(),
 	)
 
@@ -94,6 +100,8 @@ func main() {
 			"status": "ok",
 		})
 	})
+
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	api := r.Group("/api")
 
