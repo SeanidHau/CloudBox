@@ -11,6 +11,7 @@ const (
 	DefaultUserStorageQuotaBytes int64 = 1 << 30
 	DefaultRedisUsageCacheTTL          = time.Minute
 	DefaultLogLevel                    = "info"
+	DefaultTrashRetentionHours         = 0
 )
 
 type MinIOConfig struct {
@@ -41,6 +42,7 @@ type Config struct {
 	MinIO                 MinIOConfig
 	Redis                 RedisConfig
 	LogLevel              string
+	TrashRetention        time.Duration
 }
 
 func Load() Config {
@@ -82,6 +84,12 @@ func Load() Config {
 			) * time.Second,
 		},
 		LogLevel: envLogLevel("LOG_LEVEL", DefaultLogLevel),
+		TrashRetention: time.Duration(
+			envNonNegativeIntOrDefault(
+				"TRASH_RETENTION_HOURS",
+				DefaultTrashRetentionHours,
+			),
+		) * time.Hour,
 	}
 }
 

@@ -185,14 +185,36 @@ func main() {
 		}
 	}
 
-	cleanupExpiredUploads()
+	cleanupExpiredTrash := func() {
+		if cfg.TrashRetention <= 0 {
+			return
+		}
+
+		before := time.Now().Add(-cfg.TrashRetention)
+
+		cleaned, err := fileService.CleanupDeletedBefore(before)
+		if err != nil {
+			log.Printf("cleanup expired trash: %v", err)
+			return
+		}
+		if cleaned > 0 {
+			log.Printf("cleaned %d expired trash files", cleaned)
+		}
+	}
+
+	runCleanupJobs := func() {
+		cleanupExpiredUploads()
+		cleanupExpiredTrash()
+	}
+
+	runCleanupJobs()
 
 	go func() {
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 
 		for range ticker.C {
-			cleanupExpiredUploads()
+			runCleanupJobs()
 		}
 	}()
 

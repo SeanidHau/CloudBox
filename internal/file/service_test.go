@@ -276,6 +276,48 @@ func TestServicePermanentlyDeleteSucceedsWhenStorageCleanupFails(t *testing.T) {
 	}
 }
 
+func TestServiceCleanupDeletedBeforeRemovesOnlyExpiredFiles(t *testing.T) {
+	storage := &fakeStorage{}
+	service := newTestServiceWithStorage(t, storage)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	oldFile, err := service.Upload(1, "old.txt", "text/plain", strings.NewReader("old"))
+	if err != nil {
+		t.Fatalf("upload old file: %v", err)
+	}
+	recentFile, err := service.Upload(2, "recent.txt", "text/plain", strings.NewReader("recent"))
+	if err != nil {
+		t.Fatalf("upload recent file: %v", err)
+	}
+	if err := service.SoftDelete(1, oldFile.ID); err != nil {
+		t.Fatalf("soft delete old file: %v", err)
+	}
+	if err := service.SoftDelete(2, recentFile.ID); err != nil {
+		t.Fatalf("soft delete recent file: %v", err)
+	}
+
+	if _, err := service.repo.db.Exec(`UPDATE user_files SET deleted_at = $1 WHERE id = $2`, now.Add(-48*time.Hour), oldFile.ID); err != nil {
+		t.Fatalf("set old deleted time: %v", err)
+	}
+	if _, err := service.repo.db.Exec(`UPDATE user_files SET deleted_at = $1 WHERE id = $2`, now.Add(-time.Hour), recentFile.ID); err != nil {
+		t.Fatalf("set recent deleted time: %v", err)
+	}
+
+	cleaned, err := service.CleanupDeletedBefore(now.Add(-24 * time.Hour))
+	if err != nil {
+		t.Fatalf("clean up expired files: %v", err)
+	}
+	if cleaned != 1 {
+		t.Fatalf("cleaned files = %d, want 1", cleaned)
+	}
+	if _, err := service.repo.FindDeletedByID(1, oldFile.ID); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("find cleaned file error = %v, want %v", err, ErrFileNotFound)
+	}
+	if _, err := service.repo.FindDeletedByID(2, recentFile.ID); err != nil {
+		t.Fatalf("find recent deleted file: %v", err)
+	}
+}
+
 func TestServiceGetStorageUsageUsesCache(t *testing.T) {
 	cache := &fakeStorageUsageCache{
 		values: map[int64]int64{1: 123},

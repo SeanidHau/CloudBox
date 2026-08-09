@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/SeanidHau/CloudBox/internal/database"
 )
@@ -198,6 +199,41 @@ func TestRepositoryPermanentlyDeleteRequiresTrashFile(t *testing.T) {
 	}
 	if _, err := repo.FindActiveByID(1, file.ID); err != nil {
 		t.Fatalf("find active file after rejected delete: %v", err)
+	}
+}
+
+func TestRepositoryListDeletedBefore(t *testing.T) {
+	repo := newTestRepository(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	oldFile, err := repo.Create(1, "old.txt", "uploads/old.txt", 1, "text/plain")
+	if err != nil {
+		t.Fatalf("create old file: %v", err)
+	}
+	recentFile, err := repo.Create(2, "recent.txt", "uploads/recent.txt", 1, "text/plain")
+	if err != nil {
+		t.Fatalf("create recent file: %v", err)
+	}
+	if err := repo.SoftDelete(1, oldFile.ID); err != nil {
+		t.Fatalf("soft delete old file: %v", err)
+	}
+	if err := repo.SoftDelete(2, recentFile.ID); err != nil {
+		t.Fatalf("soft delete recent file: %v", err)
+	}
+
+	if _, err := repo.db.Exec(`UPDATE user_files SET deleted_at = $1 WHERE id = $2`, now.Add(-2*time.Hour), oldFile.ID); err != nil {
+		t.Fatalf("set old deleted time: %v", err)
+	}
+	if _, err := repo.db.Exec(`UPDATE user_files SET deleted_at = $1 WHERE id = $2`, now.Add(-30*time.Minute), recentFile.ID); err != nil {
+		t.Fatalf("set recent deleted time: %v", err)
+	}
+
+	files, err := repo.ListDeletedBefore(now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("list expired deleted files: %v", err)
+	}
+	if len(files) != 1 || files[0].ID != oldFile.ID {
+		t.Fatalf("expired deleted files = %#v, want old file", files)
 	}
 }
 

@@ -26,6 +26,7 @@ func TestLoadUsesDefaults(t *testing.T) {
 		"REDIS_DB",
 		"REDIS_USAGE_CACHE_TTL_SECONDS",
 		"LOG_LEVEL",
+		"TRASH_RETENTION_HOURS",
 	} {
 		t.Setenv(name, "")
 	}
@@ -80,6 +81,9 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if cfg.LogLevel != DefaultLogLevel {
 		t.Fatalf("log level = %q, want %q", cfg.LogLevel, DefaultLogLevel)
 	}
+	if cfg.TrashRetention != 0 {
+		t.Fatalf("trash retention = %s, want disabled", cfg.TrashRetention)
+	}
 }
 
 func TestLoadUsesEnvironmentValues(t *testing.T) {
@@ -102,6 +106,7 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("REDIS_DB", "2")
 	t.Setenv("REDIS_USAGE_CACHE_TTL_SECONDS", "120")
 	t.Setenv("LOG_LEVEL", " WARN ")
+	t.Setenv("TRASH_RETENTION_HOURS", "72")
 
 	cfg := Load()
 
@@ -155,6 +160,9 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	}
 	if cfg.LogLevel != "warn" {
 		t.Fatalf("log level = %q, want warn", cfg.LogLevel)
+	}
+	if cfg.TrashRetention != 72*time.Hour {
+		t.Fatalf("trash retention = %s, want 72h0m0s", cfg.TrashRetention)
 	}
 }
 
@@ -227,6 +235,19 @@ func TestLoadFallsBackForInvalidLogLevel(t *testing.T) {
 			cfg := Load()
 			if cfg.LogLevel != DefaultLogLevel {
 				t.Fatalf("log level for %q = %q, want %q", value, cfg.LogLevel, DefaultLogLevel)
+			}
+		})
+	}
+}
+
+func TestLoadFallsBackForInvalidTrashRetention(t *testing.T) {
+	for _, value := range []string{"not-a-number", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("TRASH_RETENTION_HOURS", value)
+
+			cfg := Load()
+			if cfg.TrashRetention != 0 {
+				t.Fatalf("trash retention for %q = %s, want disabled", value, cfg.TrashRetention)
 			}
 		})
 	}

@@ -3,6 +3,7 @@ package file
 import (
 	"database/sql"
 	"errors"
+	"time"
 )
 
 var (
@@ -125,6 +126,34 @@ func (r *Repository) SoftDelete(userID int64, fileID int64) error {
 	}
 
 	return nil
+}
+
+func (r *Repository) ListDeletedBefore(before time.Time) ([]UserFile, error) {
+	rows, err := r.db.Query(
+		`SELECT id, user_id, parent_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE status = $1 AND deleted_at IS NOT NULL AND deleted_at < $2 ORDER BY deleted_at ASC`,
+		StatusDeleted,
+		before,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	files := make([]UserFile, 0)
+	for rows.Next() {
+		file, err := scanUserFile(rows)
+		if err != nil {
+			return nil, err
+		}
+
+		files = append(files, *file)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return files, nil
 }
 
 func (r *Repository) Restore(userID int64, fileID int64) error {

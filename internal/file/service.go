@@ -226,6 +226,28 @@ func (s *Service) PermanentlyDelete(userID int64, fileID int64) error {
 	return nil
 }
 
+func (s *Service) CleanupDeletedBefore(before time.Time) (int, error) {
+	files, err := s.repo.ListDeletedBefore(before)
+	if err != nil {
+		return 0, err
+	}
+
+	cleaned := 0
+	for _, file := range files {
+		if err := s.PermanentlyDelete(file.UserID, file.ID); err != nil {
+			if errors.Is(err, ErrFileNotFound) {
+				continue
+			}
+
+			return cleaned, err
+		}
+
+		cleaned++
+	}
+
+	return cleaned, nil
+}
+
 func (s *Service) InstantUpload(userID int64, originalName string, fileHash string) (*UserFile, error) {
 	return s.InstantUploadIntoFolder(userID, nil, originalName, fileHash)
 }
