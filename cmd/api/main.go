@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -67,7 +69,23 @@ func main() {
 	authService := auth.NewService(authRepo, cfg.JWTSecret)
 	authHandler := auth.NewHandler(authService)
 
-	r := gin.Default()
+	logLevel := new(slog.LevelVar)
+	if err := logLevel.UnmarshalText([]byte(cfg.LogLevel)); err != nil {
+		log.Fatalf("parse log level: %v", err)
+	}
+
+	requestLogger := slog.New(
+		slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level: logLevel,
+		}),
+	)
+
+	r := gin.New()
+	r.Use(
+		middleware.RequestID(),
+		middleware.RequestLogger(requestLogger),
+		gin.Recovery(),
+	)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{

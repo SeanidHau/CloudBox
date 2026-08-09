@@ -25,6 +25,7 @@ func TestLoadUsesDefaults(t *testing.T) {
 		"REDIS_PASSWORD",
 		"REDIS_DB",
 		"REDIS_USAGE_CACHE_TTL_SECONDS",
+		"LOG_LEVEL",
 	} {
 		t.Setenv(name, "")
 	}
@@ -76,6 +77,9 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if cfg.Redis.UsageCacheTTL != DefaultRedisUsageCacheTTL {
 		t.Fatalf("Redis usage cache TTL = %s, want %s", cfg.Redis.UsageCacheTTL, DefaultRedisUsageCacheTTL)
 	}
+	if cfg.LogLevel != DefaultLogLevel {
+		t.Fatalf("log level = %q, want %q", cfg.LogLevel, DefaultLogLevel)
+	}
 }
 
 func TestLoadUsesEnvironmentValues(t *testing.T) {
@@ -97,6 +101,7 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("REDIS_PASSWORD", " redis-password ")
 	t.Setenv("REDIS_DB", "2")
 	t.Setenv("REDIS_USAGE_CACHE_TTL_SECONDS", "120")
+	t.Setenv("LOG_LEVEL", " WARN ")
 
 	cfg := Load()
 
@@ -148,6 +153,9 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	if cfg.Redis.UsageCacheTTL != 2*time.Minute {
 		t.Fatalf("Redis usage cache TTL = %s, want 2m0s", cfg.Redis.UsageCacheTTL)
 	}
+	if cfg.LogLevel != "warn" {
+		t.Fatalf("log level = %q, want warn", cfg.LogLevel)
+	}
 }
 
 func TestLoadFallsBackForInvalidMinIOUseSSL(t *testing.T) {
@@ -193,6 +201,32 @@ func TestLoadFallsBackForInvalidRedisUsageCacheTTL(t *testing.T) {
 			cfg := Load()
 			if cfg.Redis.UsageCacheTTL != DefaultRedisUsageCacheTTL {
 				t.Fatalf("Redis usage cache TTL for %q = %s, want %s", value, cfg.Redis.UsageCacheTTL, DefaultRedisUsageCacheTTL)
+			}
+		})
+	}
+}
+
+func TestLoadAcceptsValidLogLevels(t *testing.T) {
+	for _, value := range []string{"debug", "info", "warn", "error"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("LOG_LEVEL", value)
+
+			cfg := Load()
+			if cfg.LogLevel != value {
+				t.Fatalf("log level for %q = %q, want %q", value, cfg.LogLevel, value)
+			}
+		})
+	}
+}
+
+func TestLoadFallsBackForInvalidLogLevel(t *testing.T) {
+	for _, value := range []string{"trace", "warning", "fatal"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("LOG_LEVEL", value)
+
+			cfg := Load()
+			if cfg.LogLevel != DefaultLogLevel {
+				t.Fatalf("log level for %q = %q, want %q", value, cfg.LogLevel, DefaultLogLevel)
 			}
 		})
 	}

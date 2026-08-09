@@ -10,6 +10,7 @@ import (
 const (
 	DefaultUserStorageQuotaBytes int64 = 1 << 30
 	DefaultRedisUsageCacheTTL          = time.Minute
+	DefaultLogLevel                    = "info"
 )
 
 type MinIOConfig struct {
@@ -39,6 +40,7 @@ type Config struct {
 	StorageDriver         string
 	MinIO                 MinIOConfig
 	Redis                 RedisConfig
+	LogLevel              string
 }
 
 func Load() Config {
@@ -79,6 +81,7 @@ func Load() Config {
 				envInt64OrDefault("REDIS_USAGE_CACHE_TTL_SECONDS", int64(DefaultRedisUsageCacheTTL/time.Second)),
 			) * time.Second,
 		},
+		LogLevel: envLogLevel("LOG_LEVEL", DefaultLogLevel),
 	}
 }
 
@@ -131,4 +134,15 @@ func envNonNegativeIntOrDefault(name string, fallback int) int {
 	}
 
 	return parsed
+}
+
+func envLogLevel(name string, fallback string) string {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+
+	switch value {
+	case "debug", "info", "warn", "error":
+		return value
+	default:
+		return fallback
+	}
 }
