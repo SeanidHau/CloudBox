@@ -38,11 +38,11 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] 可配置的回收站过期清理：启动时和每小时检查一次
 - [x] 请求 ID、JSON 结构化访问日志与可配置日志级别
 - [x] Prometheus HTTP 指标：请求数、耗时直方图和并发请求数
+- [x] OpenTelemetry HTTP 链路追踪：W3C `traceparent` 传播、访问日志关联和本地标准输出导出
 
 ### 未完成
 
 - [ ] 异步任务，例如缩略图、病毒扫描和失败重试
-- [ ] 链路追踪
 - [ ] Web 前端
 
 ## 技术栈
@@ -52,6 +52,7 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - SQLite 或 PostgreSQL
 - Redis（可选的存储用量缓存）
 - Prometheus 指标
+- OpenTelemetry 链路追踪
 - JWT + bcrypt
 - 本地磁盘存储或 MinIO 对象存储
 - SHA-256
@@ -76,6 +77,7 @@ cmd/api/             API 入口和路由组装
 internal/auth/       注册、登录与 JWT
 internal/cache/      Redis 缓存适配器
 internal/metrics/    Prometheus HTTP 指标
+internal/telemetry/  OpenTelemetry 追踪初始化和 HTTP Span
 internal/file/       用户文件、去重和下载
 internal/share/      分享链接、公开下载和撤销
 internal/upload/     上传任务、分片、进度和合并
@@ -133,6 +135,26 @@ HTTP 指标包含：
 - `cloudbox_http_requests_in_flight`：当前正在处理的请求数
 
 路由标签使用例如 `/files/:id` 的模板路径，而不是实际文件 ID，避免产生过多指标时间序列。
+
+## 链路追踪
+
+CloudBox 为每个 HTTP 请求创建一个 OpenTelemetry Server Span。若请求包含标准 W3C `traceparent` 请求头，服务会续接上游 Trace；否则会创建新的 Trace。
+
+访问日志中的 `trace_id` 和 `span_id` 与对应 Span 一致，可将单次请求日志与追踪数据关联起来。`request_id` 仍是 CloudBox 单独生成并通过 `X-Request-ID` 返回的请求标识。
+
+`TRACE_EXPORTER` 控制追踪导出方式：
+
+- `none`：默认值，关闭导出；仍可安全运行，额外开销很低
+- `stdout`：将完整 Span 以 JSON 输出到应用标准输出，适合本地学习和调试
+
+本地验证可临时启动：
+
+```bash
+TRACE_EXPORTER=stdout /usr/local/go/bin/go run ./cmd/api
+curl http://localhost:8080/health
+```
+
+终端会先显示 JSON 访问日志，再显示 `GET /health` 对应的 Span。后续接入 OpenTelemetry Collector 时，只需新增导出器配置，无须改动 HTTP Handler、Service 或 Repository。
 
 ### 使用 MinIO
 

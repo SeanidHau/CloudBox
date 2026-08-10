@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestRequestLoggerWritesRequestFields(t *testing.T) {
@@ -75,5 +76,37 @@ func TestRequestLoggerOmitsUserIDWhenUnauthenticated(t *testing.T) {
 	}
 	if _, exists := entry["user_id"]; exists {
 		t.Fatalf("unauthenticated log contains user ID: %#v", entry["user_id"])
+	}
+}
+
+func TestRequestLoggerWritesTraceFieldsWhenSpanContextExists(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	spanContext := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{1},
+		SpanID:  trace.SpanID{2},
+	})
+
+	router := gin.New()
+	router.Use(RequestLogger(logger))
+	router.GET("/health", func(c *gin.Context) {
+		// The logger reads the SpanContext from the request context after c.Next.
+		c.Request = c.Request.WithContext(trace.ContextWithSpanContext(c.Request.Context(), spanContext))
+		c.Status(http.StatusOK)
+	})
+
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	var entry map[string]any
+	if err := json.Unmarshal(output.Bytes(), &entry); err != nil {
+		t.Fatalf("decode JSON log: %v; output: %s", err, output.String())
+	}
+	if entry["trace_id"] != spanContext.TraceID().String() {
+		t.Fatalf("trace ID = %#v, want %q", entry["trace_id"], spanContext.TraceID())
+	}
+	if entry["span_id"] != spanContext.SpanID().String() {
+		t.Fatalf("span ID = %#v, want %q", entry["span_id"], spanContext.SpanID())
 	}
 }

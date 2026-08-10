@@ -27,6 +27,7 @@ func TestLoadUsesDefaults(t *testing.T) {
 		"REDIS_USAGE_CACHE_TTL_SECONDS",
 		"LOG_LEVEL",
 		"TRASH_RETENTION_HOURS",
+		"TRACE_EXPORTER",
 	} {
 		t.Setenv(name, "")
 	}
@@ -84,6 +85,9 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if cfg.TrashRetention != 0 {
 		t.Fatalf("trash retention = %s, want disabled", cfg.TrashRetention)
 	}
+	if cfg.TraceExporter != DefaultTraceExporter {
+		t.Fatalf("trace exporter = %q, want %q", cfg.TraceExporter, DefaultTraceExporter)
+	}
 }
 
 func TestLoadUsesEnvironmentValues(t *testing.T) {
@@ -107,6 +111,7 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("REDIS_USAGE_CACHE_TTL_SECONDS", "120")
 	t.Setenv("LOG_LEVEL", " WARN ")
 	t.Setenv("TRASH_RETENTION_HOURS", "72")
+	t.Setenv("TRACE_EXPORTER", " STDOUT ")
 
 	cfg := Load()
 
@@ -163,6 +168,9 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	}
 	if cfg.TrashRetention != 72*time.Hour {
 		t.Fatalf("trash retention = %s, want 72h0m0s", cfg.TrashRetention)
+	}
+	if cfg.TraceExporter != "stdout" {
+		t.Fatalf("trace exporter = %q, want stdout", cfg.TraceExporter)
 	}
 }
 
@@ -248,6 +256,19 @@ func TestLoadFallsBackForInvalidTrashRetention(t *testing.T) {
 			cfg := Load()
 			if cfg.TrashRetention != 0 {
 				t.Fatalf("trash retention for %q = %s, want disabled", value, cfg.TrashRetention)
+			}
+		})
+	}
+}
+
+func TestLoadFallsBackForInvalidTraceExporter(t *testing.T) {
+	for _, value := range []string{"otlp", "console", "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("TRACE_EXPORTER", value)
+
+			cfg := Load()
+			if cfg.TraceExporter != DefaultTraceExporter {
+				t.Fatalf("trace exporter for %q = %q, want %q", value, cfg.TraceExporter, DefaultTraceExporter)
 			}
 		})
 	}

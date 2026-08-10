@@ -12,6 +12,7 @@ const (
 	DefaultRedisUsageCacheTTL          = time.Minute
 	DefaultLogLevel                    = "info"
 	DefaultTrashRetentionHours         = 0
+	DefaultTraceExporter               = "none"
 )
 
 type MinIOConfig struct {
@@ -43,6 +44,7 @@ type Config struct {
 	Redis                 RedisConfig
 	LogLevel              string
 	TrashRetention        time.Duration
+	TraceExporter         string
 }
 
 func Load() Config {
@@ -90,6 +92,7 @@ func Load() Config {
 				DefaultTrashRetentionHours,
 			),
 		) * time.Hour,
+		TraceExporter: envTraceExporter("TRACE_EXPORTER", DefaultTraceExporter),
 	}
 }
 
@@ -149,6 +152,17 @@ func envLogLevel(name string, fallback string) string {
 
 	switch value {
 	case "debug", "info", "warn", "error":
+		return value
+	default:
+		return fallback
+	}
+}
+
+func envTraceExporter(name string, fallback string) string {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+
+	switch value {
+	case "none", "stdout":
 		return value
 	default:
 		return fallback

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func RequestLogger(logger *slog.Logger) gin.HandlerFunc {
@@ -24,6 +25,15 @@ func RequestLogger(logger *slog.Logger) gin.HandlerFunc {
 			"path", c.Request.URL.Path,
 			"status", c.Writer.Status(),
 			"latency_ms", time.Since(startAt).Milliseconds(),
+		}
+
+		spanContext := trace.SpanContextFromContext(c.Request.Context())
+		if spanContext.IsValid() {
+			attributes = append(
+				attributes,
+				"trace_id", spanContext.TraceID().String(),
+				"span_id", spanContext.SpanID().String(),
+			)
 		}
 
 		if userID, ok := CurrentUserID(c); ok {

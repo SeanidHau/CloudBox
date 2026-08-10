@@ -19,6 +19,7 @@ import (
 	"github.com/SeanidHau/CloudBox/internal/middleware"
 	sharemodule "github.com/SeanidHau/CloudBox/internal/share"
 	"github.com/SeanidHau/CloudBox/internal/storage"
+	telemetrymodule "github.com/SeanidHau/CloudBox/internal/telemetry"
 	uploadmodule "github.com/SeanidHau/CloudBox/internal/upload"
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus"
@@ -85,11 +86,29 @@ func main() {
 
 	slog.SetDefault(requestLogger)
 
+	shutdownTracing, err := telemetrymodule.SetupTracing(
+		"cloudbox",
+		cfg.TraceExporter,
+	)
+	if err != nil {
+		log.Fatalf("setup tracing: %v", err)
+	}
+
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := shutdownTracing(ctx); err != nil {
+			slog.Error("shutdown tracing", "error", err)
+		}
+	}()
+
 	httpMetrics := metricsmodule.NewHTTPMetrics(prometheus.DefaultRegisterer)
 
 	r := gin.New()
 	r.Use(
 		middleware.RequestID(),
+		telemetrymodule.HTTPTracing(),
 		middleware.RequestLogger(requestLogger),
 		httpMetrics.Middleware(),
 		gin.Recovery(),
