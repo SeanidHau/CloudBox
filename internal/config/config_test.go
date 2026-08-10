@@ -28,6 +28,8 @@ func TestLoadUsesDefaults(t *testing.T) {
 		"LOG_LEVEL",
 		"TRASH_RETENTION_HOURS",
 		"TRACE_EXPORTER",
+		"JOB_WORKER_COUNT",
+		"JOB_POLL_INTERVAL_MILLISECONDS",
 	} {
 		t.Setenv(name, "")
 	}
@@ -88,6 +90,12 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if cfg.TraceExporter != DefaultTraceExporter {
 		t.Fatalf("trace exporter = %q, want %q", cfg.TraceExporter, DefaultTraceExporter)
 	}
+	if cfg.JobWorkerCount != DefaultJobWorkerCount {
+		t.Fatalf("job worker count = %d, want %d", cfg.JobWorkerCount, DefaultJobWorkerCount)
+	}
+	if cfg.JobPollInterval != DefaultJobPollInterval {
+		t.Fatalf("job poll interval = %s, want %s", cfg.JobPollInterval, DefaultJobPollInterval)
+	}
 }
 
 func TestLoadUsesEnvironmentValues(t *testing.T) {
@@ -112,6 +120,10 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("LOG_LEVEL", " WARN ")
 	t.Setenv("TRASH_RETENTION_HOURS", "72")
 	t.Setenv("TRACE_EXPORTER", " STDOUT ")
+	// Zero explicitly disables background workers while keeping the HTTP API available.
+	t.Setenv("JOB_WORKER_COUNT", "0")
+	// The configured unit is milliseconds so short polling intervals remain readable.
+	t.Setenv("JOB_POLL_INTERVAL_MILLISECONDS", "250")
 
 	cfg := Load()
 
@@ -171,6 +183,38 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	}
 	if cfg.TraceExporter != "stdout" {
 		t.Fatalf("trace exporter = %q, want stdout", cfg.TraceExporter)
+	}
+	if cfg.JobWorkerCount != 0 {
+		t.Fatalf("job worker count = %d, want 0", cfg.JobWorkerCount)
+	}
+	if cfg.JobPollInterval != 250*time.Millisecond {
+		t.Fatalf("job poll interval = %s, want 250ms", cfg.JobPollInterval)
+	}
+}
+
+func TestLoadFallsBackForInvalidJobWorkerCount(t *testing.T) {
+	for _, value := range []string{"not-a-number", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("JOB_WORKER_COUNT", value)
+
+			cfg := Load()
+			if cfg.JobWorkerCount != DefaultJobWorkerCount {
+				t.Fatalf("job worker count for %q = %d, want %d", value, cfg.JobWorkerCount, DefaultJobWorkerCount)
+			}
+		})
+	}
+}
+
+func TestLoadFallsBackForInvalidJobPollInterval(t *testing.T) {
+	for _, value := range []string{"not-a-number", "0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("JOB_POLL_INTERVAL_MILLISECONDS", value)
+
+			cfg := Load()
+			if cfg.JobPollInterval != DefaultJobPollInterval {
+				t.Fatalf("job poll interval for %q = %s, want %s", value, cfg.JobPollInterval, DefaultJobPollInterval)
+			}
+		})
 	}
 }
 

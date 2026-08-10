@@ -46,6 +46,32 @@ func (r *Repository) FindActiveByID(userID int64, fileID int64) (*UserFile, erro
 	return r.findByIDAndStatus(userID, fileID, StatusActive)
 }
 
+func (r *Repository) FindObjectForActiveFile(fileID int64) (*FileObject, error) {
+	var object FileObject
+
+	err := r.db.QueryRow(
+		`SELECT fo.id, fo.file_hash, fo.storage_path, fo.size, fo.content_type, fo.reference_count, fo.created_at FROM user_files AS uf JOIN file_objects AS fo ON fo.id = uf.object_id WHERE uf.id = $1 AND uf.status = $2`,
+		fileID,
+		StatusActive,
+	).Scan(
+		&object.ID,
+		&object.FileHash,
+		&object.StoragePath,
+		&object.Size,
+		&object.ContentType,
+		&object.ReferenceCount,
+		&object.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrFileNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &object, nil
+}
+
 func (r *Repository) FindDeletedByID(userID int64, fileID int64) (*UserFile, error) {
 	return r.findByIDAndStatus(userID, fileID, StatusDeleted)
 }

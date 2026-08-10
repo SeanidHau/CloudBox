@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	jobmodule "github.com/SeanidHau/CloudBox/internal/job"
 	"github.com/SeanidHau/CloudBox/internal/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -69,6 +70,53 @@ func newAuthenticatedRequest(method string, target string, body io.Reader, token
 	request := httptest.NewRequest(method, target, body)
 	request.Header.Set("Authorization", "Bearer "+token)
 	return request
+}
+
+func TestFileHandlerEnqueueVerification(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	storage := &fakeStorage{}
+	queue := &fakeJobEnqueuer{
+		job: &jobmodule.Job{ID: "verify-job", Status: jobmodule.StatusQueued},
+	}
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		storage,
+		testStorageQuotaBytes,
+		WithJobEnqueuer(queue),
+	)
+	uploaded, err := service.Upload(1, "verify.txt", "text/plain", strings.NewReader("verify content"))
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+
+	handler := NewHandler(service)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, int64(1))
+		c.Next()
+	})
+	router.POST("/files/:id/verify", handler.EnqueueVerification)
+
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(
+		http.MethodPost,
+		"/files/"+strconv.FormatInt(uploaded.ID, 10)+"/verify",
+		nil,
+	))
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("enqueue status = %d, want %d: %s", response.Code, http.StatusAccepted, response.Body.String())
+	}
+
+	var result struct {
+		Job jobmodule.Job `json:"job"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode enqueue response: %v", err)
+	}
+	if result.Job.ID != "verify-job" || queue.userID != 1 {
+		t.Fatalf("enqueue result/user = %#v/%d, want verify-job/1", result.Job, queue.userID)
+	}
 }
 
 func TestFileHandlerLifecycle(t *testing.T) {

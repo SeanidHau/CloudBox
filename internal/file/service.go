@@ -1,22 +1,29 @@
 package file
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"log/slog"
 	"strings"
 	"time"
+
+	jobmodule "github.com/SeanidHau/CloudBox/internal/job"
 )
 
 var (
-	ErrOriginalNameRequired = errors.New("original name is required")
-	ErrContentRequired      = errors.New("file content is required")
-	ErrFileHashRequired     = errors.New("file hash is required")
-	ErrFolderNameRequired   = errors.New("folder name is required")
-	ErrFolderAlreadyExists  = errors.New("folder already exists")
-	ErrFolderMoveCycle      = errors.New("folder cannot be moved into itself or its descendant")
-	ErrFolderNotEmpty       = errors.New("folder is not empty")
-	ErrStorageQuotaExceeded = errors.New("storage quota exceeded")
+	ErrOriginalNameRequired  = errors.New("original name is required")
+	ErrContentRequired       = errors.New("file content is required")
+	ErrFileHashRequired      = errors.New("file hash is required")
+	ErrFolderNameRequired    = errors.New("folder name is required")
+	ErrFolderAlreadyExists   = errors.New("folder already exists")
+	ErrFolderMoveCycle       = errors.New("folder cannot be moved into itself or its descendant")
+	ErrFolderNotEmpty        = errors.New("folder is not empty")
+	ErrStorageQuotaExceeded  = errors.New("storage quota exceeded")
+	ErrFileIntegrityMismatch = errors.New("file content does not match stored hash")
+	ErrJobQueueUnavailable   = errors.New("background job queue is unavailable")
 )
 
 type Storage interface {
@@ -29,6 +36,14 @@ type StorageUsageCache interface {
 	Get(userID int64) (usedBytes int64, found bool, err error)
 	Set(userID int64, usedBytes int64, ttl time.Duration) error
 	Delete(userID int64) error
+}
+
+type JobEnqueuer interface {
+	EnqueueForUser(
+		userID int64,
+		jobType string,
+		payload any,
+	) (*jobmodule.Job, error)
 }
 
 type ServiceOption func(*Service)
@@ -44,12 +59,21 @@ func WithStorageUsageCache(cache StorageUsageCache, ttl time.Duration) ServiceOp
 	}
 }
 
+func WithJobEnqueuer(enqueuer JobEnqueuer) ServiceOption {
+	return func(service *Service) {
+		if enqueuer != nil {
+			service.jobEnqueuer = enqueuer
+		}
+	}
+}
+
 type Service struct {
 	repo                 *Repository
 	storage              Storage
 	storageQuotaBytes    int64
 	storageUsageCache    StorageUsageCache
 	storageUsageCacheTTL time.Duration
+	jobEnqueuer          JobEnqueuer
 }
 
 func NewService(
@@ -191,6 +215,58 @@ func (s *Service) OpenForDownload(userID int64, fileID int64) (*UserFile, io.Rea
 	}
 
 	return file, reader, nil
+}
+
+func (s *Service) VerifyActiveFile(ctx context.Context, fileID int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	object, err := s.repo.FindObjectForActiveFile(fileID)
+	if err != nil {
+		return err
+	}
+
+	reader, err := s.storage.Open(object.StoragePath)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, reader); err != nil {
+		return err
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	actualHash := hex.EncodeToString(hasher.Sum(nil))
+	if actualHash != object.FileHash {
+		return ErrFileIntegrityMismatch
+	}
+
+	return nil
+}
+
+func (s *Service) EnqueueFileVerification(
+	userID int64,
+	fileID int64,
+) (*jobmodule.Job, error) {
+	if _, err := s.repo.FindActiveByID(userID, fileID); err != nil {
+		return nil, err
+	}
+
+	if s.jobEnqueuer == nil {
+		return nil, ErrJobQueueUnavailable
+	}
+
+	return s.jobEnqueuer.EnqueueForUser(
+		userID,
+		jobmodule.TypeVerifyFile,
+		VerifyFilePayload{FileID: fileID},
+	)
 }
 
 func (s *Service) SoftDelete(userID int64, fileID int64) error {

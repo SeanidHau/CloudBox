@@ -1,6 +1,7 @@
 package file
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/SeanidHau/CloudBox/internal/database"
+	jobmodule "github.com/SeanidHau/CloudBox/internal/job"
 )
 
 type fakeStorage struct {
@@ -20,6 +22,15 @@ type fakeStorage struct {
 	saveErr      error
 	openErr      error
 	deleteErr    error
+}
+
+type fakeJobEnqueuer struct {
+	job     *jobmodule.Job
+	err     error
+	userID  int64
+	jobType string
+	payload any
+	calls   int
 }
 
 type fakeReadSeekCloser struct {
@@ -77,6 +88,19 @@ func (s *fakeStorage) Open(storagePath string) (io.ReadSeekCloser, error) {
 func (s *fakeStorage) Delete(storagePath string) error {
 	s.deletedPath = storagePath
 	return s.deleteErr
+}
+
+func (e *fakeJobEnqueuer) EnqueueForUser(
+	userID int64,
+	jobType string,
+	payload any,
+) (*jobmodule.Job, error) {
+	e.calls++
+	e.userID = userID
+	e.jobType = jobType
+	e.payload = payload
+
+	return e.job, e.err
 }
 
 func (c *fakeStorageUsageCache) Get(userID int64) (int64, bool, error) {
@@ -191,6 +215,107 @@ func TestServiceUploadAndOpenForDownload(t *testing.T) {
 	}
 	if string(content) != "hello cloudbox" {
 		t.Fatalf("downloaded content = %q, want %q", string(content), "hello cloudbox")
+	}
+}
+
+func TestServiceVerifyActiveFile(t *testing.T) {
+	storage := &fakeStorage{}
+	service := newTestServiceWithStorage(t, storage)
+
+	uploaded, err := service.Upload(1, "verified.txt", "text/plain", strings.NewReader("verified content"))
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+
+	if err := service.VerifyActiveFile(context.Background(), uploaded.ID); err != nil {
+		t.Fatalf("verify active file: %v", err)
+	}
+}
+
+func TestServiceVerifyActiveFileDetectsModifiedContent(t *testing.T) {
+	storage := &fakeStorage{}
+	service := newTestServiceWithStorage(t, storage)
+
+	uploaded, err := service.Upload(1, "modified.txt", "text/plain", strings.NewReader("original content"))
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+
+	// Simulate an object that was changed after its hash was stored in the database.
+	storage.savedContent = "modified content"
+
+	if err := service.VerifyActiveFile(context.Background(), uploaded.ID); !errors.Is(err, ErrFileIntegrityMismatch) {
+		t.Fatalf("verify modified file error = %v, want %v", err, ErrFileIntegrityMismatch)
+	}
+}
+
+func TestServiceVerifyActiveFileRejectsDeletedFile(t *testing.T) {
+	storage := &fakeStorage{}
+	service := newTestServiceWithStorage(t, storage)
+
+	uploaded, err := service.Upload(1, "deleted.txt", "text/plain", strings.NewReader("deleted content"))
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	if err := service.SoftDelete(1, uploaded.ID); err != nil {
+		t.Fatalf("soft delete file: %v", err)
+	}
+
+	if err := service.VerifyActiveFile(context.Background(), uploaded.ID); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("verify deleted file error = %v, want %v", err, ErrFileNotFound)
+	}
+}
+
+func TestServiceEnqueueFileVerificationChecksOwnershipAndQueue(t *testing.T) {
+	storage := &fakeStorage{}
+	queue := &fakeJobEnqueuer{
+		job: &jobmodule.Job{ID: "verify-job", Status: jobmodule.StatusQueued},
+	}
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		storage,
+		testStorageQuotaBytes,
+		WithJobEnqueuer(queue),
+	)
+
+	uploaded, err := service.Upload(1, "verify.txt", "text/plain", strings.NewReader("verify content"))
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+
+	queued, err := service.EnqueueFileVerification(1, uploaded.ID)
+	if err != nil {
+		t.Fatalf("enqueue verification: %v", err)
+	}
+	if queued.ID != "verify-job" || queue.calls != 1 {
+		t.Fatalf("queued job/calls = %#v/%d, want verify-job/1", queued, queue.calls)
+	}
+	if queue.userID != 1 || queue.jobType != jobmodule.TypeVerifyFile {
+		t.Fatalf("queue user/type = %d/%q, want 1/%q", queue.userID, queue.jobType, jobmodule.TypeVerifyFile)
+	}
+	payload, ok := queue.payload.(VerifyFilePayload)
+	if !ok || payload.FileID != uploaded.ID {
+		t.Fatalf("queue payload = %#v, want file ID %d", queue.payload, uploaded.ID)
+	}
+
+	if _, err := service.EnqueueFileVerification(2, uploaded.ID); !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("enqueue other user file error = %v, want %v", err, ErrFileNotFound)
+	}
+	if queue.calls != 1 {
+		t.Fatalf("queue calls after rejected ownership = %d, want 1", queue.calls)
+	}
+}
+
+func TestServiceEnqueueFileVerificationRequiresQueue(t *testing.T) {
+	service := newTestServiceWithStorage(t, &fakeStorage{})
+
+	uploaded, err := service.Upload(1, "verify.txt", "text/plain", strings.NewReader("verify content"))
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+
+	if _, err := service.EnqueueFileVerification(1, uploaded.ID); !errors.Is(err, ErrJobQueueUnavailable) {
+		t.Fatalf("enqueue without queue error = %v, want %v", err, ErrJobQueueUnavailable)
 	}
 }
 

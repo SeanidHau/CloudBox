@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/SeanidHau/CloudBox/internal/auth"
@@ -15,6 +18,7 @@ import (
 	"github.com/SeanidHau/CloudBox/internal/config"
 	"github.com/SeanidHau/CloudBox/internal/database"
 	filemodule "github.com/SeanidHau/CloudBox/internal/file"
+	jobmodule "github.com/SeanidHau/CloudBox/internal/job"
 	metricsmodule "github.com/SeanidHau/CloudBox/internal/metrics"
 	"github.com/SeanidHau/CloudBox/internal/middleware"
 	sharemodule "github.com/SeanidHau/CloudBox/internal/share"
@@ -48,12 +52,16 @@ func main() {
 			"migrations/005_folders.sql",
 			"migrations/006_upload_task_parent.sql",
 			"migrations/007_file_shares.sql",
+			"migrations/008_background_jobs.sql",
+			"migrations/009_background_job_user.sql",
 		}
 
 	case "postgres":
 		db, err = database.OpenPostgres(cfg.DatabaseURL)
 		migrationPaths = []string{
 			"migrations/postgres/001_init.sql",
+			"migrations/postgres/002_background_jobs.sql",
+			"migrations/postgres/003_background_job_user.sql",
 		}
 
 	default:
@@ -178,12 +186,30 @@ func main() {
 		)
 	}
 
+	jobRepo := jobmodule.NewRepository(db)
+	jobService := jobmodule.NewService(jobRepo)
+	jobHTTPHandler := jobmodule.NewHTTPHandler(jobService)
+
+	fileServiceOptions = append(
+		fileServiceOptions,
+		filemodule.WithJobEnqueuer(jobService),
+	)
+
 	filerepo := filemodule.NewRepository(db)
 	fileService := filemodule.NewService(
 		filerepo,
 		objectStorage,
 		cfg.UserStorageQuotaBytes,
 		fileServiceOptions...,
+	)
+	jobRunner := jobmodule.NewRunner(
+		jobRepo,
+		map[string]jobmodule.Handler{
+			jobmodule.TypeVerifyFile: filemodule.NewVerifyFileJobHandler(fileService),
+		},
+		jobmodule.WithWorkerCount(cfg.JobWorkerCount),
+		jobmodule.WithPollInterval(cfg.JobPollInterval),
+		jobmodule.WithLogger(requestLogger),
 	)
 	fileHandler := filemodule.NewHandler(fileService)
 
@@ -270,6 +296,7 @@ func main() {
 	protected.DELETE("/files/:id/permanent", fileHandler.PermanentlyDelete)
 	protected.DELETE("/files/:id", fileHandler.SoftDelete)
 	protected.POST("/files/:id/restore", fileHandler.Restore)
+	protected.POST("/files/:id/verify", fileHandler.EnqueueVerification)
 	protected.POST("/uploads/init", uploadHandler.Init)
 	protected.PUT("/uploads/:id/chunks/:number", uploadHandler.UploadChunk)
 	protected.POST("/uploads/:id/complete", uploadHandler.Complete)
@@ -286,8 +313,42 @@ func main() {
 	protected.POST("/files/:id/shares", shareHandler.Create)
 	protected.GET("/shares", shareHandler.List)
 	protected.DELETE("/shares/:token", shareHandler.Revoke)
+	protected.GET("/jobs/:id", jobHTTPHandler.Get)
 
-	if err := r.Run(cfg.HTTPAddr); err != nil {
-		log.Fatal(err)
+	runContext, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+	defer stop()
+
+	workerDone := make(chan struct{})
+
+	go func() {
+		defer close(workerDone)
+		jobRunner.Run(runContext)
+	}()
+
+	server := &http.Server{
+		Addr:    cfg.HTTPAddr,
+		Handler: r,
 	}
+
+	go func() {
+		<-runContext.Done()
+
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := server.Shutdown(shutdownContext); err != nil {
+			slog.Error("shutdown HTTP server:", "error", err)
+		}
+	}()
+
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("serve HTTP", "error", err)
+		stop()
+	}
+
+	<-workerDone
 }

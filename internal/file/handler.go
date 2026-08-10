@@ -277,6 +277,38 @@ func (h *Handler) Restore(c *gin.Context) {
 	})
 }
 
+func (h *Handler) EnqueueVerification(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	fileID, err := parseFileID(c)
+	if err != nil || fileID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	job, err := h.service.EnqueueFileVerification(userID, fileID)
+	if errors.Is(err, ErrFileNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		return
+	}
+	if errors.Is(err, ErrJobQueueUnavailable) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to enqueue file verification"})
+		return
+	}
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"job": job,
+	})
+}
+
 func parseFileID(c *gin.Context) (int64, error) {
 	return strconv.ParseInt(c.Param("id"), 10, 64)
 }

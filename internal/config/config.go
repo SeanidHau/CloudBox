@@ -13,6 +13,8 @@ const (
 	DefaultLogLevel                    = "info"
 	DefaultTrashRetentionHours         = 0
 	DefaultTraceExporter               = "none"
+	DefaultJobWorkerCount              = 1
+	DefaultJobPollInterval             = time.Second
 )
 
 type MinIOConfig struct {
@@ -45,6 +47,8 @@ type Config struct {
 	LogLevel              string
 	TrashRetention        time.Duration
 	TraceExporter         string
+	JobWorkerCount        int
+	JobPollInterval       time.Duration
 }
 
 func Load() Config {
@@ -93,6 +97,16 @@ func Load() Config {
 			),
 		) * time.Hour,
 		TraceExporter: envTraceExporter("TRACE_EXPORTER", DefaultTraceExporter),
+		JobWorkerCount: envNonNegativeIntOrDefault(
+			"JOB_WORKER_COUNT",
+			DefaultJobWorkerCount,
+		),
+		JobPollInterval: time.Duration(
+			envInt64OrDefault(
+				"JOB_POLL_INTERVAL_MILLISECONDS",
+				int64(DefaultJobPollInterval/time.Millisecond),
+			),
+		) * time.Millisecond,
 	}
 }
 

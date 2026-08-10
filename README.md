@@ -1,6 +1,6 @@
 # CloudBox
 
-CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件存储 API 起步，逐步加入内容去重、HTTP Range 下载，以及大文件分片上传和断点续传。
+CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件存储 API 起步，逐步加入内容去重、HTTP Range 下载、大文件分片上传和断点续传，以及持久化后台任务。
 
 ## 当前进度
 
@@ -39,10 +39,12 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] 请求 ID、JSON 结构化访问日志与可配置日志级别
 - [x] Prometheus HTTP 指标：请求数、耗时直方图和并发请求数
 - [x] OpenTelemetry HTTP 链路追踪：W3C `traceparent` 传播、访问日志关联和本地标准输出导出
+- [x] 持久化后台任务队列：数据库领取、并发安全状态转换、指数退避重试和优雅退出
+- [x] 文件完整性校验任务：异步重新计算 SHA-256，并按任务所属用户隔离查询结果
 
 ### 未完成
 
-- [ ] 异步任务，例如缩略图、病毒扫描和失败重试
+- [ ] 基于后台任务的缩略图生成和病毒扫描
 - [ ] Web 前端
 
 ## 技术栈
@@ -68,6 +70,12 @@ Service      执行业务规则、权限边界和文件流程
     |-- Repository   访问 SQLite 或 PostgreSQL
     |-- Storage      保存、打开和删除本地文件或对象存储对象
     `-- Cache        可选地读取 Redis 存储用量缓存
+
+后台 Worker
+    |
+background_jobs  持久化任务、状态、重试次数和下次执行时间
+    |
+Job Runner        原子领取到期任务并调用对应 Handler
 ```
 
 主要目录：
@@ -79,6 +87,7 @@ internal/cache/      Redis 缓存适配器
 internal/metrics/    Prometheus HTTP 指标
 internal/telemetry/  OpenTelemetry 追踪初始化和 HTTP Span
 internal/file/       用户文件、去重和下载
+internal/job/        后台任务、Worker 和任务状态查询
 internal/share/      分享链接、公开下载和撤销
 internal/upload/     上传任务、分片、进度和合并
 internal/storage/    本地磁盘和 MinIO 对象存储
@@ -186,7 +195,7 @@ docker compose -f compose.yaml -f compose.postgres.yaml ps
 curl http://localhost:8080/health
 ```
 
-应用会自动执行 `migrations/postgres/001_init.sql`。PostgreSQL 数据保存在命名 volume `postgres-data` 中。
+应用会自动执行 `migrations/postgres/` 下已配置的迁移。PostgreSQL 数据保存在命名 volume `postgres-data` 中。
 
 ### 使用 Redis
 
@@ -235,6 +244,9 @@ docker compose \
 | `REDIS_DB` | `0` | Redis 逻辑数据库编号，不能为负数 |
 | `REDIS_USAGE_CACHE_TTL_SECONDS` | `60` | 存储用量缓存有效期，单位为秒 |
 | `TRASH_RETENTION_HOURS` | `0` | 回收站自动永久删除保留期，单位为小时；`0` 表示禁用 |
+| `TRACE_EXPORTER` | `none` | 链路追踪导出器：`none` 或 `stdout` |
+| `JOB_WORKER_COUNT` | `1` | 后台任务 Worker 数量；`0` 表示只接受任务，不消费任务 |
+| `JOB_POLL_INTERVAL_MILLISECONDS` | `1000` | 队列为空时的轮询间隔，单位为毫秒 |
 
 ## API 一览
 
@@ -256,6 +268,8 @@ Authorization: Bearer <JWT>
 | 软删除 | `DELETE /api/files/:id` |
 | 永久删除回收站文件 | `DELETE /api/files/:id/permanent` |
 | 恢复文件 | `POST /api/files/:id/restore` |
+| 创建文件完整性校验任务 | `POST /api/files/:id/verify` |
+| 查询我的后台任务状态 | `GET /api/jobs/:id` |
 | 移动文件 | `PATCH /api/files/:id/move` |
 | 重命名文件 | `PATCH /api/files/:id/rename` |
 | 创建文件夹 | `POST /api/folders` |
@@ -295,6 +309,28 @@ POST /api/uploads/:id/complete
 
 分片编号从 `0` 开始。最后一块可以小于普通分片大小；其他分片必须与初始化时声明的大小一致。
 `parent_id` 可选；未传时文件位于根目录。所有目录操作均按当前 JWT 用户隔离，不能访问其他用户的目录。
+
+## 后台任务
+
+后台任务存储在 `background_jobs` 表中，状态依次为 `queued`、`running`、`succeeded` 或 `failed`。Worker 只领取 `run_at` 已到期的 `queued` 任务；处理失败时会记录错误并按 1、2、4、8、16、32 秒的间隔重试，达到最大尝试次数后标记为 `failed`。
+
+当前已实现 `file.verify`：服务重新读取已上传文件、流式计算 SHA-256，并与文件对象保存的哈希比较。校验任务的创建和查询都受 JWT 用户隔离；其他用户访问任务 ID 时得到 `404 Not Found`。
+
+创建校验任务后，响应会返回任务 ID：
+
+```bash
+curl -X POST "http://localhost:8080/api/files/$FILE_ID/verify" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+使用该 ID 查询状态：
+
+```bash
+curl "http://localhost:8080/api/jobs/$JOB_ID" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+服务收到 `SIGINT` 或 `SIGTERM` 时，会停止 HTTP 服务并等待 Worker 退出。开发排障时可设置 `JOB_WORKER_COUNT=0`，此时接口仍会创建 `queued` 任务，但不会在当前进程中执行。
 
 ## 存储配额
 
@@ -375,6 +411,8 @@ curl -X POST \
 - 接口如何让本地磁盘和 MinIO 在不改业务层代码的前提下互换
 - 数据库方言差异如何通过独立迁移和统一 Repository SQL 兼容
 - 缓存为何只用于查询加速，配额等限制性判断仍必须查询数据库
+- 后台任务为何需要持久化状态、原子领取和重试延迟
+- 长时间运行的 Worker 如何通过 `context` 与信号实现优雅退出
 
 ## 验证状态
 
@@ -384,7 +422,7 @@ curl -X POST \
 /usr/local/go/bin/go test ./...
 ```
 
-并已通过本地 HTTP 端到端验证：注册、登录、初始化上传、三块分片上传、状态查询、合并完成、下载内容比对。
+并已通过本地 HTTP 端到端验证：注册、登录、初始化上传、三块分片上传、状态查询、合并完成、下载内容比对，以及文件校验任务从创建到成功状态查询。
 
 PostgreSQL 和 Redis Compose 覆盖配置也已完成端到端验证。Redis 验证覆盖空间统计缓存首次写入、上传后的缓存失效，以及后续查询重新写入缓存。
 
