@@ -27,6 +27,7 @@ func newTestRepository(t *testing.T) *Repository {
 		"../../migrations/005_folders.sql",
 		"../../migrations/007_file_shares.sql",
 		"../../migrations/010_file_preview.sql",
+		"../../migrations/011_file_scans.sql",
 	); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
@@ -176,6 +177,158 @@ func TestRepositoryCreatesAndSharesFilePreview(t *testing.T) {
 	}
 	if _, err := repo.FindFilePreviewForActiveFile(1, firstFile.ID); !errors.Is(err, ErrFilePreviewNotFound) {
 		t.Fatalf("deleted file preview error = %v, want %v", err, ErrFilePreviewNotFound)
+	}
+}
+
+func TestRepositoryCreatesAndReusesPendingFileScan(t *testing.T) {
+	repo := newTestRepository(t)
+
+	object, err := repo.CreateFileObject(
+		"scan-source-hash",
+		"uploads/source.bin",
+		100,
+		"application/octet-stream",
+	)
+	if err != nil {
+		t.Fatalf("create file object: %v", err)
+	}
+
+	scan, created, err := repo.CreatePendingFileScan(object.ID)
+	if err != nil {
+		t.Fatalf("create pending scan: %v", err)
+	}
+	if !created {
+		t.Fatal("first pending scan insert should create a record")
+	}
+	if scan.FileObjectID != object.ID || scan.Status != ScanStatusPending {
+		t.Fatalf("scan = %#v, want pending state for object %d", scan, object.ID)
+	}
+	if scan.Signature.Valid || scan.ScannedAt.Valid {
+		t.Fatalf("new scan signature/time = %#v/%#v, want null", scan.Signature, scan.ScannedAt)
+	}
+
+	reused, created, err := repo.CreatePendingFileScan(object.ID)
+	if err != nil {
+		t.Fatalf("create duplicate pending scan: %v", err)
+	}
+	if created {
+		t.Fatal("duplicate pending scan insert should reuse the existing record")
+	}
+	if reused.FileObjectID != scan.FileObjectID || reused.Status != ScanStatusPending {
+		t.Fatalf("reused scan = %#v, want existing pending scan", reused)
+	}
+
+	if _, err := repo.FindFileScanByObjectID(object.ID + 1); !errors.Is(err, ErrFileScanNotFound) {
+		t.Fatalf("find missing scan error = %v, want %v", err, ErrFileScanNotFound)
+	}
+}
+
+func TestRepositoryTransitionsFileScanStates(t *testing.T) {
+	repo := newTestRepository(t)
+
+	object, err := repo.CreateFileObject(
+		"clean-scan-source-hash",
+		"uploads/clean-source.bin",
+		100,
+		"application/octet-stream",
+	)
+	if err != nil {
+		t.Fatalf("create clean file object: %v", err)
+	}
+	if _, _, err := repo.CreatePendingFileScan(object.ID); err != nil {
+		t.Fatalf("create clean pending scan: %v", err)
+	}
+
+	// The conditional UPDATE makes the first worker the only worker that can claim this scan.
+	claimedScan, claimed, err := repo.ClaimFileScan(object.ID)
+	if err != nil {
+		t.Fatalf("claim pending scan: %v", err)
+	}
+	if !claimed || claimedScan.Status != ScanStatusScanning {
+		t.Fatalf("claimed scan = %#v, claimed = %t, want scanning/true", claimedScan, claimed)
+	}
+
+	// A second worker sees the current state but cannot take over an in-progress scan.
+	repeatedClaim, claimed, err := repo.ClaimFileScan(object.ID)
+	if err != nil {
+		t.Fatalf("claim already running scan: %v", err)
+	}
+	if claimed || repeatedClaim.Status != ScanStatusScanning {
+		t.Fatalf("repeated claim = %#v, claimed = %t, want scanning/false", repeatedClaim, claimed)
+	}
+
+	cleanScan, err := repo.CompleteFileScan(object.ID, false, "")
+	if err != nil {
+		t.Fatalf("complete clean scan: %v", err)
+	}
+	if cleanScan.Status != ScanStatusClean || cleanScan.Signature.Valid || !cleanScan.ScannedAt.Valid {
+		t.Fatalf("clean scan = %#v, want clean status without signature and with scanned time", cleanScan)
+	}
+
+	terminalClaim, claimed, err := repo.ClaimFileScan(object.ID)
+	if err != nil {
+		t.Fatalf("claim terminal scan: %v", err)
+	}
+	if claimed || terminalClaim.Status != ScanStatusClean {
+		t.Fatalf("terminal claim = %#v, claimed = %t, want clean/false", terminalClaim, claimed)
+	}
+
+	infectedObject, err := repo.CreateFileObject(
+		"infected-scan-source-hash",
+		"uploads/infected-source.bin",
+		100,
+		"application/octet-stream",
+	)
+	if err != nil {
+		t.Fatalf("create infected file object: %v", err)
+	}
+	if _, _, err := repo.CreatePendingFileScan(infectedObject.ID); err != nil {
+		t.Fatalf("create infected pending scan: %v", err)
+	}
+	if _, claimed, err := repo.ClaimFileScan(infectedObject.ID); err != nil || !claimed {
+		t.Fatalf("claim infected scan = claimed:%t err:%v, want true/nil", claimed, err)
+	}
+
+	// An infected result persists the signature that ClamAV reports to the application.
+	infectedScan, err := repo.CompleteFileScan(infectedObject.ID, true, "Eicar-Test-Signature")
+	if err != nil {
+		t.Fatalf("complete infected scan: %v", err)
+	}
+	if infectedScan.Status != ScanStatusInfected || !infectedScan.Signature.Valid || infectedScan.Signature.String != "Eicar-Test-Signature" || !infectedScan.ScannedAt.Valid {
+		t.Fatalf("infected scan = %#v, want infected state with signature and scanned time", infectedScan)
+	}
+
+	retryObject, err := repo.CreateFileObject(
+		"retry-scan-source-hash",
+		"uploads/retry-source.bin",
+		100,
+		"application/octet-stream",
+	)
+	if err != nil {
+		t.Fatalf("create retry file object: %v", err)
+	}
+	if _, _, err := repo.CreatePendingFileScan(retryObject.ID); err != nil {
+		t.Fatalf("create retry pending scan: %v", err)
+	}
+	if _, claimed, err := repo.ClaimFileScan(retryObject.ID); err != nil || !claimed {
+		t.Fatalf("claim retry scan = claimed:%t err:%v, want true/nil", claimed, err)
+	}
+
+	// Failed scans keep no completion time and are eligible for a later retry.
+	failedScan, err := repo.FailFileScan(retryObject.ID)
+	if err != nil {
+		t.Fatalf("fail running scan: %v", err)
+	}
+	if failedScan.Status != ScanStatusFailed || failedScan.Signature.Valid || failedScan.ScannedAt.Valid {
+		t.Fatalf("failed scan = %#v, want failed status without signature or scanned time", failedScan)
+	}
+
+	retriedScan, claimed, err := repo.ClaimFileScan(retryObject.ID)
+	if err != nil {
+		t.Fatalf("claim failed scan for retry: %v", err)
+	}
+	if !claimed || retriedScan.Status != ScanStatusScanning {
+		t.Fatalf("retried scan = %#v, claimed = %t, want scanning/true", retriedScan, claimed)
 	}
 }
 

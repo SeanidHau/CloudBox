@@ -5,25 +5,30 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"time"
 
 	jobmodule "github.com/SeanidHau/CloudBox/internal/job"
+	"github.com/SeanidHau/CloudBox/internal/scanner"
 )
 
 var (
-	ErrOriginalNameRequired  = errors.New("original name is required")
-	ErrContentRequired       = errors.New("file content is required")
-	ErrFileHashRequired      = errors.New("file hash is required")
-	ErrFolderNameRequired    = errors.New("folder name is required")
-	ErrFolderAlreadyExists   = errors.New("folder already exists")
-	ErrFolderMoveCycle       = errors.New("folder cannot be moved into itself or its descendant")
-	ErrFolderNotEmpty        = errors.New("folder is not empty")
-	ErrStorageQuotaExceeded  = errors.New("storage quota exceeded")
-	ErrFileIntegrityMismatch = errors.New("file content does not match stored hash")
-	ErrJobQueueUnavailable   = errors.New("background job queue is unavailable")
+	ErrOriginalNameRequired    = errors.New("original name is required")
+	ErrContentRequired         = errors.New("file content is required")
+	ErrFileHashRequired        = errors.New("file hash is required")
+	ErrFolderNameRequired      = errors.New("folder name is required")
+	ErrFolderAlreadyExists     = errors.New("folder already exists")
+	ErrFolderMoveCycle         = errors.New("folder cannot be moved into itself or its descendant")
+	ErrFolderNotEmpty          = errors.New("folder is not empty")
+	ErrStorageQuotaExceeded    = errors.New("storage quota exceeded")
+	ErrFileIntegrityMismatch   = errors.New("file content does not match stored hash")
+	ErrJobQueueUnavailable     = errors.New("background job queue is unavailable")
+	ErrVirusScannerUnavailable = errors.New("virus scanner is unavailable")
+	ErrFileScanIncomplete      = errors.New("file is unavailable until virus scan completes")
+	ErrFileInfected            = errors.New("file is infected")
 )
 
 type Storage interface {
@@ -67,6 +72,22 @@ func WithJobEnqueuer(enqueuer JobEnqueuer) ServiceOption {
 	}
 }
 
+func WithVirusScanner(virusScanner scanner.Scanner) ServiceOption {
+	return func(service *Service) {
+		if virusScanner != nil {
+			service.virusScanner = virusScanner
+		}
+	}
+}
+
+func WithVirusScanTimeout(timeout time.Duration) ServiceOption {
+	return func(service *Service) {
+		if timeout > 0 {
+			service.virusScanTimeout = timeout
+		}
+	}
+}
+
 type Service struct {
 	repo                 *Repository
 	storage              Storage
@@ -74,6 +95,8 @@ type Service struct {
 	storageUsageCache    StorageUsageCache
 	storageUsageCacheTTL time.Duration
 	jobEnqueuer          JobEnqueuer
+	virusScanner         scanner.Scanner
+	virusScanTimeout     time.Duration
 }
 
 func NewService(
@@ -178,7 +201,13 @@ func (s *Service) UploadIntoFolder(
 	}
 
 	s.invalidateStorageUsageCache(userID)
-	s.enqueueThumbnailIfSupported(userID, file.ID, object)
+	if s.virusScanner == nil {
+		// 扫描关闭时保持原有行为：图片上传后直接生成缩略图。
+		s.enqueueThumbnailIfSupported(userID, file.ID, object)
+	} else {
+		// 扫描开启时，缩略图必须等到文件被确认 clean 后再生成。
+		s.enqueueFileScanIfEnabled(userID, file.ID, object)
+	}
 
 	return file, nil
 }
@@ -210,6 +239,14 @@ func (s *Service) OpenForDownload(userID int64, fileID int64) (*UserFile, io.Rea
 		return nil, nil, err
 	}
 
+	object, err := s.repo.FindObjectForActiveFile(fileID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := s.CheckFileObjectDownload(object.ID); err != nil {
+		return nil, nil, err
+	}
+
 	reader, err := s.storage.Open(file.StoragePath)
 	if err != nil {
 		return nil, nil, err
@@ -227,12 +264,39 @@ func (s *Service) OpenThumbnailForDownload(
 		return nil, nil, err
 	}
 
+	if err := s.CheckFileObjectDownload(preview.FileObjectID); err != nil {
+		return nil, nil, err
+	}
+
 	reader, err := s.storage.Open(preview.StoragePath)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return preview, reader, nil
+}
+
+func (s *Service) CheckFileObjectDownload(fileObjectID int64) error {
+	if s.virusScanner == nil {
+		return nil
+	}
+
+	scan, err := s.repo.FindFileScanByObjectID(fileObjectID)
+	if errors.Is(err, ErrFileScanNotFound) {
+		return ErrFileScanIncomplete
+	}
+	if err != nil {
+		return err
+	}
+
+	switch scan.Status {
+	case ScanStatusClean:
+		return nil
+	case ScanStatusInfected:
+		return ErrFileInfected
+	default:
+		return ErrFileScanIncomplete
+	}
 }
 
 func (s *Service) VerifyActiveFile(ctx context.Context, fileID int64) error {
@@ -266,6 +330,84 @@ func (s *Service) VerifyActiveFile(ctx context.Context, fileID int64) error {
 	}
 
 	return nil
+}
+
+func (s *Service) ScanActiveFile(ctx context.Context, userID int64, fileID int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.virusScanner == nil {
+		return ErrVirusScannerUnavailable
+	}
+
+	userFile, err := s.repo.FindActiveByID(userID, fileID)
+	if err != nil {
+		return err
+	}
+
+	object, err := s.repo.FindObjectForActiveFile(fileID)
+	if err != nil {
+		return err
+	}
+
+	if _, _, err := s.repo.CreatePendingFileScan(object.ID); err != nil {
+		return fmt.Errorf("create file scan: %w", err)
+	}
+
+	_, claimed, err := s.repo.ClaimFileScan(object.ID)
+	if err != nil {
+		return fmt.Errorf("claim file scan: %w", err)
+	}
+	if !claimed {
+		return nil
+	}
+
+	source, err := s.storage.Open(object.StoragePath)
+	if err != nil {
+		return s.markFileScanFailed(
+			object.ID,
+			fmt.Errorf("open file for virus scan: %w", err),
+		)
+	}
+	defer source.Close()
+
+	scanContext := ctx
+	cancel := func() {}
+
+	if s.virusScanTimeout > 0 {
+		scanContext, cancel = context.WithTimeout(ctx, s.virusScanTimeout)
+	}
+	defer cancel()
+
+	result, err := s.virusScanner.Scan(scanContext, source)
+	if err != nil {
+		return s.markFileScanFailed(
+			object.ID,
+			fmt.Errorf("scan file content: %w", err),
+		)
+	}
+
+	if _, err := s.repo.CompleteFileScan(
+		object.ID,
+		result.Infected,
+		result.Signature,
+	); err != nil {
+		return fmt.Errorf("complete file scan: %w", err)
+	}
+	if !result.Infected {
+		// 只有通过扫描的图片才允许进入后续缩略图解码流程。
+		s.enqueueThumbnailIfSupported(userFile.UserID, userFile.ID, object)
+	}
+
+	return nil
+}
+
+func (s *Service) markFileScanFailed(fileObjectID int64, cause error) error {
+	if _, err := s.repo.FailFileScan(fileObjectID); err != nil {
+		return fmt.Errorf("%w; mark file scan failed: %v", cause, err)
+	}
+
+	return cause
 }
 
 func (s *Service) EnqueueFileVerification(
@@ -395,7 +537,13 @@ func (s *Service) InstantUploadIntoFolder(
 	}
 
 	s.invalidateStorageUsageCache(userID)
-	s.enqueueThumbnailIfSupported(userID, file.ID, object)
+	if s.virusScanner == nil {
+		// 秒传在未启用扫描时沿用原有缩略图流程。
+		s.enqueueThumbnailIfSupported(userID, file.ID, object)
+	} else {
+		// 已启用扫描时，即使对象来自去重也必须先检查扫描状态。
+		s.enqueueFileScanIfEnabled(userID, file.ID, object)
+	}
 
 	return file, nil
 }
@@ -616,6 +764,46 @@ func (s *Service) EnsureStorageQuota(
 	}
 
 	return nil
+}
+
+func (s *Service) enqueueFileScanIfEnabled(
+	userID int64,
+	fileID int64,
+	object *FileObject,
+) {
+	if s.virusScanner == nil || s.jobEnqueuer == nil || object == nil {
+		return
+	}
+
+	scan, _, err := s.repo.CreatePendingFileScan(object.ID)
+	if err != nil {
+		slog.Error(
+			"create pending file scan",
+			"user_id", userID,
+			"file_id", fileID,
+			"object_id", object.ID,
+			"error", err,
+		)
+		return
+	}
+
+	if scan.Status != ScanStatusPending && scan.Status != ScanStatusFailed {
+		return
+	}
+
+	if _, err := s.jobEnqueuer.EnqueueForUser(
+		userID,
+		jobmodule.TypeScanFile,
+		ScanFilePayload{FileID: fileID},
+	); err != nil {
+		slog.Error(
+			"enqueue file scan job",
+			"user_id", userID,
+			"file_id", fileID,
+			"object_id", object.ID,
+			"error", err,
+		)
+	}
 }
 
 func (s *Service) enqueueThumbnailIfSupported(

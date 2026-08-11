@@ -17,6 +17,7 @@ import (
 
 	jobmodule "github.com/SeanidHau/CloudBox/internal/job"
 	"github.com/SeanidHau/CloudBox/internal/middleware"
+	"github.com/SeanidHau/CloudBox/internal/scanner"
 	"github.com/gin-gonic/gin"
 )
 
@@ -154,6 +155,61 @@ func TestThumbnailQueueFailureDoesNotFailImageUpload(t *testing.T) {
 	}
 	if uploaded.ID == 0 || queue.calls != 1 {
 		t.Fatalf("uploaded file/queue calls = %#v/%d, want saved file and one enqueue attempt", uploaded, queue.calls)
+	}
+}
+
+func TestImageUploadDefersThumbnailUntilVirusScanSucceeds(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		scanResult       scanner.Result
+		wantQueueCalls   int
+		wantFinalJobType string
+	}{
+		{
+			name:             "clean file",
+			scanResult:       scanner.Result{},
+			wantQueueCalls:   2,
+			wantFinalJobType: jobmodule.TypeGenerateThumbnail,
+		},
+		{
+			name: "infected file",
+			scanResult: scanner.Result{
+				Infected:  true,
+				Signature: "Eicar-Test-Signature",
+			},
+			wantQueueCalls:   1,
+			wantFinalJobType: jobmodule.TypeScanFile,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			storage := &fakeStorage{}
+			queue := &fakeJobEnqueuer{job: &jobmodule.Job{ID: "background-job"}}
+			service := newTestServiceWithStorageQuotaAndOptions(
+				t,
+				storage,
+				testStorageQuotaBytes,
+				WithVirusScanner(&fakeVirusScanner{result: test.scanResult}),
+				WithJobEnqueuer(queue),
+			)
+			content := encodeTestImage(t, "image/png", image.NewRGBA(image.Rect(0, 0, 10, 10)))
+
+			uploaded, err := service.Upload(1, "source.png", "image/png", strings.NewReader(string(content)))
+			if err != nil {
+				t.Fatalf("upload image: %v", err)
+			}
+
+			// Enabling scanning queues only the scan; decoding waits for a clean result.
+			if queue.calls != 1 || queue.jobType != jobmodule.TypeScanFile {
+				t.Fatalf("upload queue = %#v, want one %q job", queue, jobmodule.TypeScanFile)
+			}
+
+			if err := service.ScanActiveFile(context.Background(), 1, uploaded.ID); err != nil {
+				t.Fatalf("scan uploaded image: %v", err)
+			}
+			if queue.calls != test.wantQueueCalls || queue.jobType != test.wantFinalJobType {
+				t.Fatalf("queue after scan = %#v, want %d %q jobs", queue, test.wantQueueCalls, test.wantFinalJobType)
+			}
+		})
 	}
 }
 

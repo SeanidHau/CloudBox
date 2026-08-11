@@ -115,9 +115,10 @@ func (r *Repository) FindActiveFileByShareToken(token string) (*SharedFile, erro
 	var file SharedFile
 
 	err := r.db.QueryRow(
-		`SELECT uf.id, uf.original_name, uf.storage_path, uf.size, uf.content_type FROM file_shares AS fs JOIN user_files AS uf ON uf.id = fs.user_file_id WHERE fs.token = $1 AND uf.status = 'active'`,
+		`SELECT uf.object_id, uf.id, uf.original_name, uf.storage_path, uf.size, uf.content_type FROM file_shares AS fs JOIN user_files AS uf ON uf.id = fs.user_file_id WHERE fs.token = $1 AND uf.status = 'active'`,
 		token,
 	).Scan(
+		&file.ObjectID,
 		&file.ID,
 		&file.OriginalName,
 		&file.StoragePath,

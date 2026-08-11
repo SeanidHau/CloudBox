@@ -42,10 +42,11 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] 持久化后台任务队列：数据库领取、并发安全状态转换、指数退避重试和优雅退出
 - [x] 文件完整性校验任务：异步重新计算 SHA-256，并按任务所属用户隔离查询结果
 - [x] 图片缩略图任务：JPEG、PNG、GIF 解码，320 px 等比缩放、共享去重对象和流式读取
+- [x] 可选 ClamAV 病毒扫描：流式 clamd INSTREAM 协议、扫描状态持久化、失败重试和真实 EICAR 集成验证
+- [x] 扫描下载策略：启用扫描后仅 `clean` 文件可下载或通过分享链接访问；缩略图在扫描通过后生成
 
 ### 未完成
 
-- [ ] 基于后台任务的病毒扫描
 - [ ] Web 前端
 
 ## 技术栈
@@ -54,6 +55,7 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - Gin
 - SQLite 或 PostgreSQL
 - Redis（可选的存储用量缓存）
+- ClamAV clamd（可选的病毒扫描）
 - Prometheus 指标
 - OpenTelemetry 链路追踪
 - JWT + bcrypt
@@ -71,7 +73,8 @@ Handler      解析请求、返回状态码和 JSON
 Service      执行业务规则、权限边界和文件流程
     |-- Repository   访问 SQLite 或 PostgreSQL
     |-- Storage      保存、打开和删除本地文件或对象存储对象
-    `-- Cache        可选地读取 Redis 存储用量缓存
+    |-- Cache        可选地读取 Redis 存储用量缓存
+    `-- Scanner      可选地通过 ClamAV 检查文件内容
 
 后台 Worker
     |
@@ -249,6 +252,9 @@ docker compose \
 | `TRACE_EXPORTER` | `none` | 链路追踪导出器：`none` 或 `stdout` |
 | `JOB_WORKER_COUNT` | `1` | 后台任务 Worker 数量；`0` 表示只接受任务，不消费任务 |
 | `JOB_POLL_INTERVAL_MILLISECONDS` | `1000` | 队列为空时的轮询间隔，单位为毫秒 |
+| `CLAMAV_ENABLED` | `false` | 是否启用 ClamAV 病毒扫描 |
+| `CLAMAV_ADDRESS` | `127.0.0.1:3310` | clamd TCP 地址 |
+| `CLAMAV_TIMEOUT_SECONDS` | `60` | 单次扫描的最长时间，单位为秒 |
 
 ## API 一览
 
@@ -317,10 +323,11 @@ POST /api/uploads/:id/complete
 
 后台任务存储在 `background_jobs` 表中，状态依次为 `queued`、`running`、`succeeded` 或 `failed`。Worker 只领取 `run_at` 已到期的 `queued` 任务；处理失败时会记录错误并按 1、2、4、8、16、32 秒的间隔重试，达到最大尝试次数后标记为 `failed`。
 
-当前已实现两种任务：
+当前已实现三种任务：
 
 - `file.verify`：重新读取已上传文件、流式计算 SHA-256，并与文件对象保存的哈希比较。
 - `file.thumbnail`：解码 JPEG、PNG 或 GIF，生成最长边为 `320 px` 的 PNG 缩略图。GIF 仅使用第一帧；源图片超过 `40,000,000` 像素时会被拒绝，避免过高内存占用。
+- `file.scan`：通过 clamd INSTREAM 协议流式检查文件内容，并写入 `pending`、`scanning`、`clean`、`infected` 或 `failed` 状态。
 
 缩略图属于 `file_object` 而不是 `user_file`，因此相同内容的去重文件共享一份缩略图。最后一个用户文件被永久删除时，数据库会删除缩略图元数据，服务也会删除本地磁盘或 MinIO 中的缩略图对象。
 
@@ -342,12 +349,42 @@ curl "http://localhost:8080/api/jobs/$JOB_ID" \
 
 服务收到 `SIGINT` 或 `SIGTERM` 时，会停止 HTTP 服务并等待 Worker 退出。开发排障时可设置 `JOB_WORKER_COUNT=0`，此时接口仍会创建 `queued` 任务，但不会在当前进程中执行。
 
-图片上传后会自动创建缩略图任务。任务完成后可读取缩略图；任务尚未完成、文件不是支持的图片、文件已删除或文件不属于当前用户时，该接口返回 `404 Not Found`：
+未启用 ClamAV 时，图片上传后会自动创建缩略图任务。启用 ClamAV 时，只有扫描结果为 `clean` 的图片才会创建缩略图任务，避免在扫描前解码不受信任的图片内容。任务完成后可读取缩略图；任务尚未完成、文件不是支持的图片、文件已删除或文件不属于当前用户时，该接口返回 `404 Not Found`：
 
 ```bash
 curl "http://localhost:8080/api/files/$FILE_ID/thumbnail" \
   -H "Authorization: Bearer $TOKEN" \
   --output thumbnail.png
+```
+
+## 病毒扫描
+
+设置 `CLAMAV_ENABLED=true` 后，上传和秒传会创建 `file.scan` 后台任务。扫描记录按 `file_object` 保存，因此相同内容的去重文件共享一次扫描结果。
+
+- `clean`：允许文件下载、缩略图读取和公开分享下载。
+- `pending`、`scanning`、`failed` 或缺少扫描记录：私有下载、缩略图和公开分享下载均返回 `423 Locked`。
+- `infected`：私有下载和缩略图返回 `403 Forbidden`；公开分享返回不暴露扫描细节的 `423 Locked`。
+
+`file.scan` 失败会由 Worker 按后台任务的重试策略再次执行。扫描器不可用时，文件保持不可下载状态，不会降级为放行。
+
+本地需要运行可从 CloudBox 访问的 clamd 服务。临时验证可启动官方镜像：
+
+```bash
+docker run -d --rm --name cloudbox-clamav-test -p 3310:3310 clamav/clamav:stable
+```
+
+等待容器显示为 healthy 后，运行真实协议集成测试：
+
+```bash
+CLAMAV_TEST_ADDRESS=127.0.0.1:3310 \
+  /usr/local/go/bin/go test -count=1 -run TestClamAVScannerIntegration -v ./internal/scanner
+```
+
+该测试会发送普通内容和 EICAR 标准反病毒测试样本，分别验证 clean 与 infected 结果。验证结束后停止临时容器；不需要 Docker 时也停止 Docker Desktop：
+
+```bash
+docker stop cloudbox-clamav-test
+docker desktop stop
 ```
 
 ## 存储配额
@@ -432,6 +469,7 @@ curl -X POST \
 - 后台任务为何需要持久化状态、原子领取和重试延迟
 - 长时间运行的 Worker 如何通过 `context` 与信号实现优雅退出
 - 图像解码为何需要限制像素数量，以及如何让去重对象共享缩略图
+- 可选安全能力如何通过接口注入，且在启用后采用默认拒绝的下载策略
 
 ## 验证状态
 
@@ -459,3 +497,5 @@ MINIO_INTEGRATION_BUCKET=cloudbox \
 ```
 
 该测试实际验证 MinIO 对象的保存、SHA-256 哈希、读取、删除以及删除后不可再次读取。
+
+ClamAV 真实集成测试也已通过，覆盖 clamd INSTREAM 协议、普通内容和 EICAR 测试样本。默认 `go test ./...` 不要求本机启动 ClamAV；仅设置 `CLAMAV_TEST_ADDRESS` 时执行该测试。

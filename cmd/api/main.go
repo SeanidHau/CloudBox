@@ -21,6 +21,7 @@ import (
 	jobmodule "github.com/SeanidHau/CloudBox/internal/job"
 	metricsmodule "github.com/SeanidHau/CloudBox/internal/metrics"
 	"github.com/SeanidHau/CloudBox/internal/middleware"
+	scannermodule "github.com/SeanidHau/CloudBox/internal/scanner"
 	sharemodule "github.com/SeanidHau/CloudBox/internal/share"
 	"github.com/SeanidHau/CloudBox/internal/storage"
 	telemetrymodule "github.com/SeanidHau/CloudBox/internal/telemetry"
@@ -55,6 +56,7 @@ func main() {
 			"migrations/008_background_jobs.sql",
 			"migrations/009_background_job_user.sql",
 			"migrations/010_file_preview.sql",
+			"migrations/011_file_scans.sql",
 		}
 
 	case "postgres":
@@ -64,6 +66,7 @@ func main() {
 			"migrations/postgres/002_background_jobs.sql",
 			"migrations/postgres/003_background_job_user.sql",
 			"migrations/postgres/004_file_preview.sql",
+			"migrations/postgres/005_file_scans.sql",
 		}
 
 	default:
@@ -197,6 +200,18 @@ func main() {
 		filemodule.WithJobEnqueuer(jobService),
 	)
 
+	if cfg.ClamAV.Enabled {
+		clamAVScanner, err := scannermodule.NewClamAVScanner(cfg.ClamAV.Address)
+		if err != nil {
+			log.Fatalf("create ClamAV scanner: %v", err)
+		}
+
+		fileServiceOptions = append(
+			fileServiceOptions,
+			filemodule.WithVirusScanner(clamAVScanner),
+			filemodule.WithVirusScanTimeout(cfg.ClamAV.Timeout))
+	}
+
 	filerepo := filemodule.NewRepository(db)
 	fileService := filemodule.NewService(
 		filerepo,
@@ -209,6 +224,7 @@ func main() {
 		map[string]jobmodule.Handler{
 			jobmodule.TypeVerifyFile:        filemodule.NewVerifyFileJobHandler(fileService),
 			jobmodule.TypeGenerateThumbnail: filemodule.NewThumbnailJobHandler(fileService),
+			jobmodule.TypeScanFile:          filemodule.NewScanFileJobHandler(fileService),
 		},
 		jobmodule.WithWorkerCount(cfg.JobWorkerCount),
 		jobmodule.WithPollInterval(cfg.JobPollInterval),
@@ -217,7 +233,7 @@ func main() {
 	fileHandler := filemodule.NewHandler(fileService)
 
 	shareRepo := sharemodule.NewRepository(db)
-	shareService := sharemodule.NewService(shareRepo, objectStorage)
+	shareService := sharemodule.NewService(shareRepo, objectStorage, sharemodule.WithDownloadPolicy(fileService))
 	shareHandler := sharemodule.NewHandler(shareService)
 
 	uploadRepo := uploadmodule.NewRepository(db)

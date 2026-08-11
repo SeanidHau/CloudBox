@@ -15,6 +15,7 @@ const (
 	DefaultTraceExporter               = "none"
 	DefaultJobWorkerCount              = 1
 	DefaultJobPollInterval             = time.Second
+	DefaultClamAVTimeout               = time.Minute
 )
 
 type MinIOConfig struct {
@@ -33,6 +34,12 @@ type RedisConfig struct {
 	UsageCacheTTL time.Duration
 }
 
+type ClamAVConfig struct {
+	Enabled bool
+	Address string
+	Timeout time.Duration
+}
+
 type Config struct {
 	HTTPAddr              string
 	DBPath                string
@@ -49,6 +56,7 @@ type Config struct {
 	TraceExporter         string
 	JobWorkerCount        int
 	JobPollInterval       time.Duration
+	ClamAV                ClamAVConfig
 }
 
 func Load() Config {
@@ -87,6 +95,16 @@ func Load() Config {
 			DB: envNonNegativeIntOrDefault("REDIS_DB", 0),
 			UsageCacheTTL: time.Duration(
 				envInt64OrDefault("REDIS_USAGE_CACHE_TTL_SECONDS", int64(DefaultRedisUsageCacheTTL/time.Second)),
+			) * time.Second,
+		},
+		ClamAV: ClamAVConfig{
+			Enabled: envBoolOrDefault("CLAMAV_ENABLED", false),
+			Address: envOrDefault("CLAMAV_ADDRESS", "127.0.0.1:3310"),
+			Timeout: time.Duration(
+				envInt64OrDefault(
+					"CLAMAV_TIMEOUT_SECONDS",
+					int64(DefaultClamAVTimeout/time.Second),
+				),
 			) * time.Second,
 		},
 		LogLevel: envLogLevel("LOG_LEVEL", DefaultLogLevel),

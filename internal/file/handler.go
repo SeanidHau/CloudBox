@@ -181,6 +181,14 @@ func (h *Handler) Download(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 		return
 	}
+	if errors.Is(err, ErrFileScanIncomplete) {
+		c.JSON(http.StatusLocked, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFileInfected) {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
 
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to open file"})
@@ -209,6 +217,14 @@ func (h *Handler) DownloadThumbnail(c *gin.Context) {
 	preview, reader, err := h.service.OpenThumbnailForDownload(userID, fileID)
 	if errors.Is(err, ErrFilePreviewNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "file preview not found"})
+		return
+	}
+	if errors.Is(err, ErrFileScanIncomplete) {
+		c.JSON(http.StatusLocked, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrFileInfected) {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
 	if err != nil {

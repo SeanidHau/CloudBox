@@ -3,6 +3,7 @@ package share
 import (
 	"errors"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -59,6 +60,28 @@ func createTestFile(t *testing.T, repo *Repository, userID int64, status string)
 	fileID, err := result.LastInsertId()
 	if err != nil {
 		t.Fatalf("get user file ID: %v", err)
+	}
+
+	// Tests insert user_files directly, so they must also create the object link
+	// that normal uploads populate through the file service.
+	objectResult, err := repo.db.Exec(
+		`INSERT INTO file_objects (file_hash, storage_path, size, content_type, reference_count) VALUES (?, ?, ?, ?, ?)`,
+		"share-test-object-"+strconv.FormatInt(fileID, 10),
+		"uploads/document.txt",
+		15,
+		"text/plain",
+		1,
+	)
+	if err != nil {
+		t.Fatalf("insert file object: %v", err)
+	}
+
+	objectID, err := objectResult.LastInsertId()
+	if err != nil {
+		t.Fatalf("get file object ID: %v", err)
+	}
+	if _, err := repo.db.Exec(`UPDATE user_files SET object_id = ? WHERE id = ?`, objectID, fileID); err != nil {
+		t.Fatalf("link user file to object: %v", err)
 	}
 
 	return fileID

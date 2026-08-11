@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"time"
 
@@ -17,22 +18,46 @@ var (
 	ErrSharePasswordRequired  = errors.New("share password is required")
 	ErrSharePasswordInvalid   = errors.New("share password is invalid")
 	ErrDownloadLimitReached   = errors.New("share download limit reached")
+	ErrSharedFileUnavailable  = errors.New("shared file is unavailable")
 )
 
 type Storage interface {
 	Open(storagePath string) (io.ReadSeekCloser, error)
 }
 
-type Service struct {
-	repo    *Repository
-	storage Storage
+type DownloadPolicy interface {
+	CheckFileObjectDownload(fileObject int64) error
 }
 
-func NewService(repo *Repository, storage Storage) *Service {
-	return &Service{
+type ServiceOption func(*Service)
+
+func WithDownloadPolicy(policy DownloadPolicy) ServiceOption {
+	return func(service *Service) {
+		if policy != nil {
+			service.downloadPolicy = policy
+		}
+	}
+}
+
+type Service struct {
+	repo           *Repository
+	storage        Storage
+	downloadPolicy DownloadPolicy
+}
+
+func NewService(repo *Repository, storage Storage, options ...ServiceOption) *Service {
+	service := &Service{
 		repo:    repo,
 		storage: storage,
 	}
+
+	for _, option := range options {
+		if option != nil {
+			option(service)
+		}
+	}
+
+	return service
 }
 
 func (s *Service) Create(
@@ -111,6 +136,12 @@ func (s *Service) OpenForDownload(
 	file, err := s.repo.FindActiveFileByShareToken(token)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if s.downloadPolicy != nil {
+		if err := s.downloadPolicy.CheckFileObjectDownload(file.ObjectID); err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", ErrSharedFileUnavailable, err)
+		}
 	}
 
 	reader, err := s.storage.Open(file.StoragePath)

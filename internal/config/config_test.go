@@ -30,6 +30,9 @@ func TestLoadUsesDefaults(t *testing.T) {
 		"TRACE_EXPORTER",
 		"JOB_WORKER_COUNT",
 		"JOB_POLL_INTERVAL_MILLISECONDS",
+		"CLAMAV_ENABLED",
+		"CLAMAV_ADDRESS",
+		"CLAMAV_TIMEOUT_SECONDS",
 	} {
 		t.Setenv(name, "")
 	}
@@ -96,6 +99,15 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if cfg.JobPollInterval != DefaultJobPollInterval {
 		t.Fatalf("job poll interval = %s, want %s", cfg.JobPollInterval, DefaultJobPollInterval)
 	}
+	if cfg.ClamAV.Enabled {
+		t.Fatal("ClamAV should default to disabled")
+	}
+	if cfg.ClamAV.Address != "127.0.0.1:3310" {
+		t.Fatalf("ClamAV address = %q, want 127.0.0.1:3310", cfg.ClamAV.Address)
+	}
+	if cfg.ClamAV.Timeout != DefaultClamAVTimeout {
+		t.Fatalf("ClamAV timeout = %s, want %s", cfg.ClamAV.Timeout, DefaultClamAVTimeout)
+	}
 }
 
 func TestLoadUsesEnvironmentValues(t *testing.T) {
@@ -124,6 +136,9 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	t.Setenv("JOB_WORKER_COUNT", "0")
 	// The configured unit is milliseconds so short polling intervals remain readable.
 	t.Setenv("JOB_POLL_INTERVAL_MILLISECONDS", "250")
+	t.Setenv("CLAMAV_ENABLED", "true")
+	t.Setenv("CLAMAV_ADDRESS", " clamd:3310 ")
+	t.Setenv("CLAMAV_TIMEOUT_SECONDS", "15")
 
 	cfg := Load()
 
@@ -190,6 +205,15 @@ func TestLoadUsesEnvironmentValues(t *testing.T) {
 	if cfg.JobPollInterval != 250*time.Millisecond {
 		t.Fatalf("job poll interval = %s, want 250ms", cfg.JobPollInterval)
 	}
+	if !cfg.ClamAV.Enabled {
+		t.Fatal("ClamAV enabled = false, want true")
+	}
+	if cfg.ClamAV.Address != "clamd:3310" {
+		t.Fatalf("ClamAV address = %q, want clamd:3310", cfg.ClamAV.Address)
+	}
+	if cfg.ClamAV.Timeout != 15*time.Second {
+		t.Fatalf("ClamAV timeout = %s, want 15s", cfg.ClamAV.Timeout)
+	}
 }
 
 func TestLoadFallsBackForInvalidJobWorkerCount(t *testing.T) {
@@ -213,6 +237,26 @@ func TestLoadFallsBackForInvalidJobPollInterval(t *testing.T) {
 			cfg := Load()
 			if cfg.JobPollInterval != DefaultJobPollInterval {
 				t.Fatalf("job poll interval for %q = %s, want %s", value, cfg.JobPollInterval, DefaultJobPollInterval)
+			}
+		})
+	}
+}
+
+func TestLoadFallsBackForInvalidClamAVConfiguration(t *testing.T) {
+	t.Setenv("CLAMAV_ENABLED", "not-a-bool")
+
+	cfg := Load()
+	if cfg.ClamAV.Enabled {
+		t.Fatal("invalid ClamAV enabled value should fall back to false")
+	}
+
+	for _, value := range []string{"not-a-number", "0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("CLAMAV_TIMEOUT_SECONDS", value)
+
+			cfg := Load()
+			if cfg.ClamAV.Timeout != DefaultClamAVTimeout {
+				t.Fatalf("ClamAV timeout for %q = %s, want %s", value, cfg.ClamAV.Timeout, DefaultClamAVTimeout)
 			}
 		})
 	}

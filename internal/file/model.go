@@ -6,8 +6,13 @@ import (
 )
 
 const (
-	StatusActive  = "active"
-	StatusDeleted = "deleted"
+	StatusActive       = "active"
+	StatusDeleted      = "deleted"
+	ScanStatusPending  = "pending"
+	ScanStatusScanning = "scanning"
+	ScanStatusClean    = "clean"
+	ScanStatusInfected = "infected"
+	ScanStatusFailed   = "failed"
 )
 
 type UserFile struct {
@@ -56,4 +61,13 @@ type FilePreview struct {
 	Width        int       `json:"width"`
 	Height       int       `json:"height"`
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+type FileScan struct {
+	FileObjectID int64          `json:"file_object_id"`
+	Status       string         `json:"status"`
+	Signature    sql.NullString `json:"-"`
+	ScannedAt    sql.NullTime   `json:"scanned_at"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
 }

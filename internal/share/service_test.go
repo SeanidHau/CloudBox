@@ -26,6 +26,18 @@ type fakeStorage struct {
 	lastReader *testReadSeekCloser
 }
 
+type fakeDownloadPolicy struct {
+	err          error
+	calls        int
+	fileObjectID int64
+}
+
+func (p *fakeDownloadPolicy) CheckFileObjectDownload(fileObjectID int64) error {
+	p.calls++
+	p.fileObjectID = fileObjectID
+	return p.err
+}
+
 func (s *fakeStorage) Open(storagePath string) (io.ReadSeekCloser, error) {
 	data, ok := s.content[storagePath]
 	if !ok {
@@ -203,6 +215,58 @@ func TestServiceOpenForDownload(t *testing.T) {
 	}
 	if storage.lastReader == nil || !storage.lastReader.closed {
 		t.Fatal("reader should be closed after failing to reserve a download")
+	}
+}
+
+func TestServiceOpenForDownloadAppliesDownloadPolicy(t *testing.T) {
+	repo := newTestRepository(t)
+	storage := &fakeStorage{
+		content: map[string][]byte{
+			"uploads/document.txt": []byte("shared content"),
+		},
+	}
+	policy := &fakeDownloadPolicy{err: errors.New("scan is incomplete")}
+	service := NewService(repo, storage, WithDownloadPolicy(policy))
+	fileID := createTestFile(t, repo, 1, "active")
+	maxDownloads := int64(1)
+
+	share, err := service.Create(1, fileID, "", nil, &maxDownloads)
+	if err != nil {
+		t.Fatalf("create share: %v", err)
+	}
+
+	// Reject before opening storage or consuming the limited download count.
+	if _, _, err := service.OpenForDownload(share.Token, ""); !errors.Is(err, ErrSharedFileUnavailable) {
+		t.Fatalf("blocked shared download error = %v, want %v", err, ErrSharedFileUnavailable)
+	}
+	if policy.calls != 1 || policy.fileObjectID <= 0 {
+		t.Fatalf("policy calls/object ID = %d/%d, want 1/positive", policy.calls, policy.fileObjectID)
+	}
+	if storage.lastReader != nil {
+		t.Fatal("storage must not open when the download policy rejects the file")
+	}
+
+	current, err := repo.FindByToken(share.Token)
+	if err != nil {
+		t.Fatalf("find blocked share: %v", err)
+	}
+	if current.DownloadCount != 0 {
+		t.Fatalf("download count after policy rejection = %d, want 0", current.DownloadCount)
+	}
+
+	policy.err = nil
+	_, reader, err := service.OpenForDownload(share.Token, "")
+	if err != nil {
+		t.Fatalf("open allowed shared file: %v", err)
+	}
+	defer reader.Close()
+
+	current, err = repo.FindByToken(share.Token)
+	if err != nil {
+		t.Fatalf("find allowed share: %v", err)
+	}
+	if current.DownloadCount != 1 {
+		t.Fatalf("download count after allowed download = %d, want 1", current.DownloadCount)
 	}
 }
 

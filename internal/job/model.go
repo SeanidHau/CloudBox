@@ -17,6 +17,7 @@ const (
 const (
 	TypeVerifyFile        = "file.verify"
 	TypeGenerateThumbnail = "file.thumbnail"
+	TypeScanFile          = "file.scan"
 )
 
 type Job struct {

@@ -169,7 +169,10 @@ func newTestServiceWithStorageQuotaAndOptions(
 		"../../migrations/002_file_objects.sql",
 		"../../migrations/005_folders.sql",
 		"../../migrations/007_file_shares.sql",
+		"../../migrations/008_background_jobs.sql",
+		"../../migrations/009_background_job_user.sql",
 		"../../migrations/010_file_preview.sql",
+		"../../migrations/011_file_scans.sql",
 	); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}

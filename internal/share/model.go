@@ -13,6 +13,7 @@ type Share struct {
 }
 
 type SharedFile struct {
+	ObjectID     int64
 	ID           int64
 	OriginalName string
 	StoragePath  string

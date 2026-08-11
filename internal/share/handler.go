@@ -85,6 +85,10 @@ func (h *Handler) Download(c *gin.Context) {
 		c.JSON(http.StatusGone, gin.H{"error": err.Error()})
 		return
 	}
+	if errors.Is(err, ErrSharedFileUnavailable) {
+		c.JSON(http.StatusLocked, gin.H{"error": "shared file is not available"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to open shared file"})
 		return

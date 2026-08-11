@@ -181,6 +181,61 @@ func TestMigrateFilePreviewsEnforcesConstraintsAndCascades(t *testing.T) {
 	}
 }
 
+func TestMigrateFileScansEnforcesStatusesAndCascades(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	// SQLite only applies foreign-key actions after this connection-level setting.
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+
+	if err := Migrate(
+		db,
+		"../../migrations/001_init.sql",
+		"../../migrations/002_file_objects.sql",
+		"../../migrations/011_file_scans.sql",
+	); err != nil {
+		t.Fatalf("apply file scan migration: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO file_objects (id, file_hash, storage_path, size, content_type)
+		VALUES (1, 'scan-source-hash', 'uploads/source.bin', 100, 'application/octet-stream')
+	`); err != nil {
+		t.Fatalf("insert file object: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO file_objects (id, file_hash, storage_path, size, content_type)
+		VALUES (2, 'invalid-scan-source-hash', 'uploads/invalid.bin', 100, 'application/octet-stream')
+	`); err != nil {
+		t.Fatalf("insert second file object: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO file_scans (file_object_id, status) VALUES (1, 'pending')`); err != nil {
+		t.Fatalf("insert pending scan: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO file_scans (file_object_id, status) VALUES (2, 'unknown')`); err == nil {
+		t.Fatal("expected unsupported scan status to fail")
+	}
+
+	if _, err := db.Exec(`DELETE FROM file_objects WHERE id = 1`); err != nil {
+		t.Fatalf("delete file object: %v", err)
+	}
+
+	var scanCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM file_scans`).Scan(&scanCount); err != nil {
+		t.Fatalf("count file scans: %v", err)
+	}
+	if scanCount != 0 {
+		t.Fatalf("scan count = %d, want cascade to remove it", scanCount)
+	}
+}
+
 func TestMigrateCreatesUploadTasksAndChunks(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
 	if err != nil {

@@ -2,6 +2,7 @@ package share
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -142,6 +143,40 @@ func TestHandlerCreateAndDownloadShare(t *testing.T) {
 	router.ServeHTTP(revokedDownloadRecorder, revokedDownloadRequest)
 	if revokedDownloadRecorder.Code != http.StatusNotFound {
 		t.Fatalf("revoked download status = %d, want %d: %s", revokedDownloadRecorder.Code, http.StatusNotFound, revokedDownloadRecorder.Body.String())
+	}
+}
+
+func TestHandlerDownloadReturnsLockedWhenPolicyRejectsFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	repo := newTestRepository(t)
+	storage := &fakeStorage{
+		content: map[string][]byte{
+			"uploads/document.txt": []byte("shared content"),
+		},
+	}
+	service := NewService(
+		repo,
+		storage,
+		WithDownloadPolicy(&fakeDownloadPolicy{err: errors.New("scan is incomplete")}),
+	)
+	fileID := createTestFile(t, repo, 1, "active")
+	share, err := service.Create(1, fileID, "", nil, nil)
+	if err != nil {
+		t.Fatalf("create share: %v", err)
+	}
+
+	router := gin.New()
+	router.GET("/shares/:token/download", NewHandler(service).Download)
+
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/shares/"+share.Token+"/download",
+		nil,
+	))
+	if response.Code != http.StatusLocked {
+		t.Fatalf("blocked shared download status = %d, want %d: %s", response.Code, http.StatusLocked, response.Body.String())
 	}
 }
 

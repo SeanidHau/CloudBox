@@ -11,6 +11,7 @@ var (
 	ErrFileObjectNotFound  = errors.New("file object not found")
 	ErrFolderNotFound      = errors.New("folder not found")
 	ErrFilePreviewNotFound = errors.New("file preview not found")
+	ErrFileScanNotFound    = errors.New("file scan not found")
 )
 
 type Repository struct {
@@ -121,6 +122,113 @@ func (r *Repository) CreateFilePreview(preview *FilePreview) (bool, error) {
 	}
 
 	return affected == 1, nil
+}
+
+func (r *Repository) FindFileScanByObjectID(fileObjectID int64) (*FileScan, error) {
+	row := r.db.QueryRow(
+		`SELECT file_object_id, status, signature, scanned_at, created_at, updated_at FROM file_scans WHERE file_object_id = $1`,
+		fileObjectID,
+	)
+
+	return scanFileScan(row)
+}
+
+func (r *Repository) CreatePendingFileScan(
+	fileObjectID int64,
+) (*FileScan, bool, error) {
+	result, err := r.db.Exec(
+		`INSERT INTO file_scans (file_object_id, status) VALUES ($1, $2) ON CONFLICT (file_object_id) DO NOTHING`,
+		fileObjectID,
+		ScanStatusPending,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return nil, false, err
+	}
+
+	scan, err := r.FindFileScanByObjectID(fileObjectID)
+	if err != nil {
+		return nil, false, err
+	}
+
+	return scan, affected == 1, nil
+}
+
+func (r *Repository) ClaimFileScan(fileObjectID int64) (*FileScan, bool, error) {
+	row := r.db.QueryRow(
+		`UPDATE file_scans SET status = $1, signature = NULL, scanned_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE file_object_id = $2 AND status IN ($3, $4) RETURNING file_object_id, status, signature, scanned_at, created_at, updated_at`,
+		ScanStatusScanning,
+		fileObjectID,
+		ScanStatusPending,
+		ScanStatusFailed,
+	)
+
+	scan, err := scanFileScan(row)
+	if err == nil {
+		return scan, true, nil
+	}
+	if !errors.Is(err, ErrFileScanNotFound) {
+		return nil, false, err
+	}
+
+	existing, findErr := r.FindFileScanByObjectID(fileObjectID)
+	if findErr != nil {
+		return nil, false, findErr
+	}
+
+	return existing, false, nil
+}
+
+func (r *Repository) CompleteFileScan(
+	fileObjectID int64,
+	infected bool,
+	signature string,
+) (*FileScan, error) {
+	status := ScanStatusClean
+	var storedSignature *string
+
+	if infected {
+		status = ScanStatusInfected
+		storedSignature = &signature
+	}
+
+	return r.updateRunningFileScan(
+		fileObjectID,
+		status,
+		storedSignature,
+		true,
+	)
+}
+
+func (r *Repository) FailFileScan(fileObjectID int64) (*FileScan, error) {
+	return r.updateRunningFileScan(
+		fileObjectID,
+		ScanStatusFailed,
+		nil,
+		false,
+	)
+}
+
+func (r *Repository) updateRunningFileScan(
+	fileObjectID int64,
+	status string,
+	signature *string,
+	completed bool,
+) (*FileScan, error) {
+	row := r.db.QueryRow(
+		`UPDATE file_scans SET status = $1, signature = $2, scanned_at = CASE WHEN $3 THEN CURRENT_TIMESTAMP ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE file_object_id = $4 AND status = $5 RETURNING file_object_id, status, signature, scanned_at, created_at, updated_at`,
+		status,
+		signature,
+		completed,
+		fileObjectID,
+		ScanStatusScanning,
+	)
+
+	return scanFileScan(row)
 }
 
 func (r *Repository) FindDeletedByID(userID int64, fileID int64) (*UserFile, error) {
@@ -475,6 +583,31 @@ func scanFilePreview(scanner filePreviewScanner) (*FilePreview, error) {
 	}
 
 	return &preview, nil
+}
+
+type fileScanScanner interface {
+	Scan(...any) error
+}
+
+func scanFileScan(scanner fileScanScanner) (*FileScan, error) {
+	var scan FileScan
+
+	err := scanner.Scan(
+		&scan.FileObjectID,
+		&scan.Status,
+		&scan.Signature,
+		&scan.ScannedAt,
+		&scan.CreatedAt,
+		&scan.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrFileScanNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &scan, nil
 }
 
 func (r *Repository) CreateFileObject(
