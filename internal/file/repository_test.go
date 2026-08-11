@@ -26,6 +26,7 @@ func newTestRepository(t *testing.T) *Repository {
 		"../../migrations/002_file_objects.sql",
 		"../../migrations/005_folders.sql",
 		"../../migrations/007_file_shares.sql",
+		"../../migrations/010_file_preview.sql",
 	); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
@@ -102,6 +103,82 @@ func TestRepositoryCreateListSoftDeleteAndRestore(t *testing.T) {
 	}
 }
 
+func TestRepositoryCreatesAndSharesFilePreview(t *testing.T) {
+	repo := newTestRepository(t)
+
+	object, err := repo.CreateFileObject(
+		"preview-source-hash",
+		"uploads/source.png",
+		100,
+		"image/png",
+	)
+	if err != nil {
+		t.Fatalf("create file object: %v", err)
+	}
+
+	firstFile, err := repo.CreateWithObject(1, "first.png", object)
+	if err != nil {
+		t.Fatalf("create first user file: %v", err)
+	}
+	secondFile, err := repo.CreateWithObject(2, "second.png", object)
+	if err != nil {
+		t.Fatalf("create second user file: %v", err)
+	}
+
+	preview := &FilePreview{
+		FileObjectID: object.ID,
+		StoragePath:  "uploads/source-preview.jpg",
+		Size:         50,
+		ContentType:  "image/jpeg",
+		Width:        320,
+		Height:       240,
+	}
+	created, err := repo.CreateFilePreview(preview)
+	if err != nil {
+		t.Fatalf("create file preview: %v", err)
+	}
+	if !created {
+		t.Fatal("first preview insert should create a record")
+	}
+
+	created, err = repo.CreateFilePreview(preview)
+	if err != nil {
+		t.Fatalf("create duplicate file preview: %v", err)
+	}
+	if created {
+		t.Fatal("duplicate preview insert should reuse the existing record")
+	}
+
+	byObject, err := repo.FindFilePreviewByObjectID(object.ID)
+	if err != nil {
+		t.Fatalf("find preview by object: %v", err)
+	}
+	if byObject.StoragePath != preview.StoragePath || byObject.Width != 320 || byObject.Height != 240 {
+		t.Fatalf("preview by object = %#v, want stored preview", byObject)
+	}
+
+	for _, file := range []UserFile{*firstFile, *secondFile} {
+		byFile, err := repo.FindFilePreviewForActiveFile(file.UserID, file.ID)
+		if err != nil {
+			t.Fatalf("find preview for user %d file %d: %v", file.UserID, file.ID, err)
+		}
+		if byFile.FileObjectID != object.ID {
+			t.Fatalf("preview object ID = %d, want %d", byFile.FileObjectID, object.ID)
+		}
+	}
+
+	if _, err := repo.FindFilePreviewForActiveFile(2, firstFile.ID); !errors.Is(err, ErrFilePreviewNotFound) {
+		t.Fatalf("other user preview error = %v, want %v", err, ErrFilePreviewNotFound)
+	}
+
+	if err := repo.SoftDelete(1, firstFile.ID); err != nil {
+		t.Fatalf("soft delete first file: %v", err)
+	}
+	if _, err := repo.FindFilePreviewForActiveFile(1, firstFile.ID); !errors.Is(err, ErrFilePreviewNotFound) {
+		t.Fatalf("deleted file preview error = %v, want %v", err, ErrFilePreviewNotFound)
+	}
+}
+
 func TestRepositoryPermanentlyDeleteDeletedFile(t *testing.T) {
 	repo := newTestRepository(t)
 
@@ -116,6 +193,16 @@ func TestRepositoryPermanentlyDeleteDeletedFile(t *testing.T) {
 	if _, err := repo.db.Exec(`INSERT INTO file_shares (token, user_file_id) VALUES ($1, $2)`, "permanent-share", file.ID); err != nil {
 		t.Fatalf("create file share: %v", err)
 	}
+	if _, err := repo.CreateFilePreview(&FilePreview{
+		FileObjectID: object.ID,
+		StoragePath:  "uploads/permanent-preview.png",
+		Size:         50,
+		ContentType:  "image/png",
+		Width:        320,
+		Height:       160,
+	}); err != nil {
+		t.Fatalf("create file preview: %v", err)
+	}
 	if err := repo.SoftDelete(1, file.ID); err != nil {
 		t.Fatalf("soft delete file: %v", err)
 	}
@@ -124,8 +211,11 @@ func TestRepositoryPermanentlyDeleteDeletedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("permanently delete file: %v", err)
 	}
-	if objectToDelete == nil || objectToDelete.ID != object.ID {
+	if objectToDelete == nil || objectToDelete.Object.ID != object.ID {
 		t.Fatalf("object to delete = %#v, want object %d", objectToDelete, object.ID)
+	}
+	if objectToDelete.Preview == nil || objectToDelete.Preview.StoragePath != "uploads/permanent-preview.png" {
+		t.Fatalf("preview to delete = %#v, want stored preview", objectToDelete.Preview)
 	}
 	if _, err := repo.FindDeletedByID(1, file.ID); !errors.Is(err, ErrFileNotFound) {
 		t.Fatalf("find permanently deleted file error = %v, want %v", err, ErrFileNotFound)
@@ -161,6 +251,16 @@ func TestRepositoryPermanentlyDeleteKeepsSharedObject(t *testing.T) {
 	if err := repo.SoftDelete(1, first.ID); err != nil {
 		t.Fatalf("soft delete first file: %v", err)
 	}
+	if _, err := repo.CreateFilePreview(&FilePreview{
+		FileObjectID: object.ID,
+		StoragePath:  "uploads/shared-preview.png",
+		Size:         50,
+		ContentType:  "image/png",
+		Width:        320,
+		Height:       160,
+	}); err != nil {
+		t.Fatalf("create shared preview: %v", err)
+	}
 
 	objectToDelete, err := repo.PermanentlyDeleteDeleted(1, first.ID)
 	if err != nil {
@@ -179,6 +279,9 @@ func TestRepositoryPermanentlyDeleteKeepsSharedObject(t *testing.T) {
 	}
 	if _, err := repo.FindActiveByID(2, second.ID); err != nil {
 		t.Fatalf("find remaining user file: %v", err)
+	}
+	if _, err := repo.FindFilePreviewByObjectID(object.ID); err != nil {
+		t.Fatalf("find preview for shared object: %v", err)
 	}
 }
 

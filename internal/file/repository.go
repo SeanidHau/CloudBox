@@ -7,13 +7,19 @@ import (
 )
 
 var (
-	ErrFileNotFound       = errors.New("file not found")
-	ErrFileObjectNotFound = errors.New("file object not found")
-	ErrFolderNotFound     = errors.New("folder not found")
+	ErrFileNotFound        = errors.New("file not found")
+	ErrFileObjectNotFound  = errors.New("file object not found")
+	ErrFolderNotFound      = errors.New("folder not found")
+	ErrFilePreviewNotFound = errors.New("file preview not found")
 )
 
 type Repository struct {
 	db *sql.DB
+}
+
+type UnreferencedFileObject struct {
+	Object  FileObject
+	Preview *FilePreview
 }
 
 func NewRepository(db *sql.DB) *Repository {
@@ -70,6 +76,51 @@ func (r *Repository) FindObjectForActiveFile(fileID int64) (*FileObject, error) 
 	}
 
 	return &object, nil
+}
+
+func (r *Repository) FindFilePreviewByObjectID(fileObjectID int64) (*FilePreview, error) {
+	row := r.db.QueryRow(
+		`SELECT file_object_id, storage_path, size, content_type, width, height, created_at FROM file_previews WHERE file_object_id = $1`,
+		fileObjectID,
+	)
+
+	return scanFilePreview(row)
+}
+
+func (r *Repository) FindFilePreviewForActiveFile(
+	userID int64,
+	fileID int64,
+) (*FilePreview, error) {
+	row := r.db.QueryRow(
+		`SELECT fp.file_object_id, fp.storage_path, fp.size, fp.content_type, fp.width, fp.height, fp.created_at FROM user_files AS uf JOIN file_previews AS fp ON fp.file_object_id = uf.object_id WHERE uf.id = $1 AND uf.user_id = $2 AND uf.status = $3`,
+		fileID,
+		userID,
+		StatusActive,
+	)
+
+	return scanFilePreview(row)
+}
+
+func (r *Repository) CreateFilePreview(preview *FilePreview) (bool, error) {
+	result, err := r.db.Exec(
+		`INSERT INTO file_previews (file_object_id, storage_path, size, content_type, width, height) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (file_object_id) DO NOTHING`,
+		preview.FileObjectID,
+		preview.StoragePath,
+		preview.Size,
+		preview.ContentType,
+		preview.Width,
+		preview.Height,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+
+	return affected == 1, nil
 }
 
 func (r *Repository) FindDeletedByID(userID int64, fileID int64) (*UserFile, error) {
@@ -210,7 +261,7 @@ func (r *Repository) Restore(userID int64, fileID int64) error {
 func (r *Repository) PermanentlyDeleteDeleted(
 	userID int64,
 	fileID int64,
-) (*FileObject, error) {
+) (*UnreferencedFileObject, error) {
 	tx, err := r.db.Begin()
 	if err != nil {
 		return nil, err
@@ -283,6 +334,16 @@ func (r *Repository) PermanentlyDeleteDeleted(
 		return nil, nil
 	}
 
+	preview, err := scanFilePreview(tx.QueryRow(
+		`SELECT file_object_id, storage_path, size, content_type, width, height, created_at FROM file_previews WHERE file_object_id = $1`,
+		object.ID,
+	))
+	if errors.Is(err, ErrFilePreviewNotFound) {
+		preview = nil
+	} else if err != nil {
+		return nil, err
+	}
+
 	result, err = tx.Exec(
 		`DELETE FROM file_objects WHERE id = $1 AND reference_count = 0`,
 		object.ID,
@@ -303,7 +364,10 @@ func (r *Repository) PermanentlyDeleteDeleted(
 		return nil, err
 	}
 
-	return &object, nil
+	return &UnreferencedFileObject{
+		Object:  object,
+		Preview: preview,
+	}, nil
 }
 
 func (r *Repository) findByIDAndStatus(userID int64, fileID int64, status string) (*UserFile, error) {
@@ -385,6 +449,32 @@ func scanUserFile(scanner userFileScanner) (*UserFile, error) {
 	}
 
 	return &file, nil
+}
+
+type filePreviewScanner interface {
+	Scan(...any) error
+}
+
+func scanFilePreview(scanner filePreviewScanner) (*FilePreview, error) {
+	var preview FilePreview
+
+	err := scanner.Scan(
+		&preview.FileObjectID,
+		&preview.StoragePath,
+		&preview.Size,
+		&preview.ContentType,
+		&preview.Width,
+		&preview.Height,
+		&preview.CreatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrFilePreviewNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &preview, nil
 }
 
 func (r *Repository) CreateFileObject(

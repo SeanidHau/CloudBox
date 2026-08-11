@@ -54,6 +54,7 @@ func main() {
 			"migrations/007_file_shares.sql",
 			"migrations/008_background_jobs.sql",
 			"migrations/009_background_job_user.sql",
+			"migrations/010_file_preview.sql",
 		}
 
 	case "postgres":
@@ -62,6 +63,7 @@ func main() {
 			"migrations/postgres/001_init.sql",
 			"migrations/postgres/002_background_jobs.sql",
 			"migrations/postgres/003_background_job_user.sql",
+			"migrations/postgres/004_file_preview.sql",
 		}
 
 	default:
@@ -205,7 +207,8 @@ func main() {
 	jobRunner := jobmodule.NewRunner(
 		jobRepo,
 		map[string]jobmodule.Handler{
-			jobmodule.TypeVerifyFile: filemodule.NewVerifyFileJobHandler(fileService),
+			jobmodule.TypeVerifyFile:        filemodule.NewVerifyFileJobHandler(fileService),
+			jobmodule.TypeGenerateThumbnail: filemodule.NewThumbnailJobHandler(fileService),
 		},
 		jobmodule.WithWorkerCount(cfg.JobWorkerCount),
 		jobmodule.WithPollInterval(cfg.JobPollInterval),
@@ -293,6 +296,7 @@ func main() {
 	protected.GET("/files", fileHandler.ListActive)
 	protected.GET("/files/trash", fileHandler.ListDeleted)
 	protected.GET("/files/:id/download", fileHandler.Download)
+	protected.GET("/files/:id/thumbnail", fileHandler.DownloadThumbnail)
 	protected.DELETE("/files/:id/permanent", fileHandler.PermanentlyDelete)
 	protected.DELETE("/files/:id", fileHandler.SoftDelete)
 	protected.POST("/files/:id/restore", fileHandler.Restore)

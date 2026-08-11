@@ -26,9 +26,12 @@ func TestRepositoryPermanentlyDeleteDeletedPostgres(t *testing.T) {
 		_ = db.Close()
 	})
 
-	migrationPath := filepath.Join("..", "..", "migrations", "postgres", "001_init.sql")
-	if err := database.Migrate(db, migrationPath); err != nil {
-		t.Fatalf("apply Postgres baseline migration: %v", err)
+	migrationPaths := []string{
+		filepath.Join("..", "..", "migrations", "postgres", "001_init.sql"),
+		filepath.Join("..", "..", "migrations", "postgres", "004_file_preview.sql"),
+	}
+	if err := database.Migrate(db, migrationPaths...); err != nil {
+		t.Fatalf("apply Postgres migrations: %v", err)
 	}
 
 	repo := NewRepository(db)
@@ -70,7 +73,7 @@ func TestRepositoryPermanentlyDeleteDeletedPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatalf("permanently delete file: %v", err)
 	}
-	if deletedObject == nil || deletedObject.ID != object.ID {
+	if deletedObject == nil || deletedObject.Object.ID != object.ID {
 		t.Fatalf("deleted object = %#v, want object %d", deletedObject, object.ID)
 	}
 	if _, err := repo.FindFileObjectByHash(fileHash); !errors.Is(err, ErrFileObjectNotFound) {

@@ -41,10 +41,11 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - [x] OpenTelemetry HTTP 链路追踪：W3C `traceparent` 传播、访问日志关联和本地标准输出导出
 - [x] 持久化后台任务队列：数据库领取、并发安全状态转换、指数退避重试和优雅退出
 - [x] 文件完整性校验任务：异步重新计算 SHA-256，并按任务所属用户隔离查询结果
+- [x] 图片缩略图任务：JPEG、PNG、GIF 解码，320 px 等比缩放、共享去重对象和流式读取
 
 ### 未完成
 
-- [ ] 基于后台任务的缩略图生成和病毒扫描
+- [ ] 基于后台任务的病毒扫描
 - [ ] Web 前端
 
 ## 技术栈
@@ -58,6 +59,7 @@ CloudBox 是一个用 Go 实现的网盘后端学习项目。它从本地文件�
 - JWT + bcrypt
 - 本地磁盘存储或 MinIO 对象存储
 - SHA-256
+- `golang.org/x/image/draw`
 
 ## 架构
 
@@ -269,6 +271,7 @@ Authorization: Bearer <JWT>
 | 永久删除回收站文件 | `DELETE /api/files/:id/permanent` |
 | 恢复文件 | `POST /api/files/:id/restore` |
 | 创建文件完整性校验任务 | `POST /api/files/:id/verify` |
+| 读取已生成缩略图 | `GET /api/files/:id/thumbnail` |
 | 查询我的后台任务状态 | `GET /api/jobs/:id` |
 | 移动文件 | `PATCH /api/files/:id/move` |
 | 重命名文件 | `PATCH /api/files/:id/rename` |
@@ -314,7 +317,14 @@ POST /api/uploads/:id/complete
 
 后台任务存储在 `background_jobs` 表中，状态依次为 `queued`、`running`、`succeeded` 或 `failed`。Worker 只领取 `run_at` 已到期的 `queued` 任务；处理失败时会记录错误并按 1、2、4、8、16、32 秒的间隔重试，达到最大尝试次数后标记为 `failed`。
 
-当前已实现 `file.verify`：服务重新读取已上传文件、流式计算 SHA-256，并与文件对象保存的哈希比较。校验任务的创建和查询都受 JWT 用户隔离；其他用户访问任务 ID 时得到 `404 Not Found`。
+当前已实现两种任务：
+
+- `file.verify`：重新读取已上传文件、流式计算 SHA-256，并与文件对象保存的哈希比较。
+- `file.thumbnail`：解码 JPEG、PNG 或 GIF，生成最长边为 `320 px` 的 PNG 缩略图。GIF 仅使用第一帧；源图片超过 `40,000,000` 像素时会被拒绝，避免过高内存占用。
+
+缩略图属于 `file_object` 而不是 `user_file`，因此相同内容的去重文件共享一份缩略图。最后一个用户文件被永久删除时，数据库会删除缩略图元数据，服务也会删除本地磁盘或 MinIO 中的缩略图对象。
+
+任务的创建和查询都受 JWT 用户隔离；其他用户访问任务 ID 时得到 `404 Not Found`。
 
 创建校验任务后，响应会返回任务 ID：
 
@@ -331,6 +341,14 @@ curl "http://localhost:8080/api/jobs/$JOB_ID" \
 ```
 
 服务收到 `SIGINT` 或 `SIGTERM` 时，会停止 HTTP 服务并等待 Worker 退出。开发排障时可设置 `JOB_WORKER_COUNT=0`，此时接口仍会创建 `queued` 任务，但不会在当前进程中执行。
+
+图片上传后会自动创建缩略图任务。任务完成后可读取缩略图；任务尚未完成、文件不是支持的图片、文件已删除或文件不属于当前用户时，该接口返回 `404 Not Found`：
+
+```bash
+curl "http://localhost:8080/api/files/$FILE_ID/thumbnail" \
+  -H "Authorization: Bearer $TOKEN" \
+  --output thumbnail.png
+```
 
 ## 存储配额
 
@@ -413,6 +431,7 @@ curl -X POST \
 - 缓存为何只用于查询加速，配额等限制性判断仍必须查询数据库
 - 后台任务为何需要持久化状态、原子领取和重试延迟
 - 长时间运行的 Worker 如何通过 `context` 与信号实现优雅退出
+- 图像解码为何需要限制像素数量，以及如何让去重对象共享缩略图
 
 ## 验证状态
 
@@ -422,7 +441,7 @@ curl -X POST \
 /usr/local/go/bin/go test ./...
 ```
 
-并已通过本地 HTTP 端到端验证：注册、登录、初始化上传、三块分片上传、状态查询、合并完成、下载内容比对，以及文件校验任务从创建到成功状态查询。
+并已通过本地 HTTP 端到端验证：注册、登录、初始化上传、三块分片上传、状态查询、合并完成、下载内容比对、文件校验任务，以及 JPEG 上传后缩略图任务的生成和读取。
 
 PostgreSQL 和 Redis Compose 覆盖配置也已完成端到端验证。Redis 验证覆盖空间统计缓存首次写入、上传后的缓存失效，以及后续查询重新写入缓存。
 

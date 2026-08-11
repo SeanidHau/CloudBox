@@ -22,12 +22,17 @@ func TestMigratePostgresBaseline(t *testing.T) {
 		_ = db.Close()
 	})
 
-	migrationPath := filepath.Join("..", "..", "migrations", "postgres", "001_init.sql")
-	if err := Migrate(db, migrationPath); err != nil {
-		t.Fatalf("apply Postgres baseline migration: %v", err)
+	migrationPaths := []string{
+		filepath.Join("..", "..", "migrations", "postgres", "001_init.sql"),
+		filepath.Join("..", "..", "migrations", "postgres", "002_background_jobs.sql"),
+		filepath.Join("..", "..", "migrations", "postgres", "003_background_job_user.sql"),
+		filepath.Join("..", "..", "migrations", "postgres", "004_file_preview.sql"),
 	}
-	if err := Migrate(db, migrationPath); err != nil {
-		t.Fatalf("reapply Postgres baseline migration: %v", err)
+	if err := Migrate(db, migrationPaths...); err != nil {
+		t.Fatalf("apply Postgres migrations: %v", err)
+	}
+	if err := Migrate(db, migrationPaths...); err != nil {
+		t.Fatalf("reapply Postgres migrations: %v", err)
 	}
 
 	var tableCount int
@@ -37,24 +42,27 @@ func TestMigratePostgresBaseline(t *testing.T) {
 		WHERE table_schema = 'public'
 		  AND table_name IN (
 			  'users', 'file_objects', 'folders', 'user_files',
-			  'upload_tasks', 'upload_chunks', 'file_shares'
+			  'upload_tasks', 'upload_chunks', 'file_shares',
+			  'background_jobs', 'file_previews'
 		  )
 	`).Scan(&tableCount)
 	if err != nil {
-		t.Fatalf("count baseline tables: %v", err)
+		t.Fatalf("count migrated tables: %v", err)
 	}
-	if tableCount != 7 {
-		t.Fatalf("baseline table count = %d, want 7", tableCount)
+	if tableCount != 9 {
+		t.Fatalf("migrated table count = %d, want 9", tableCount)
 	}
 
-	var migrationCount int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM schema_migrations WHERE name = $1`,
-		filepath.Base(migrationPath),
-	).Scan(&migrationCount); err != nil {
-		t.Fatalf("count migration records: %v", err)
-	}
-	if migrationCount != 1 {
-		t.Fatalf("migration count = %d, want 1", migrationCount)
+	for _, migrationPath := range migrationPaths {
+		var migrationCount int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM schema_migrations WHERE name = $1`,
+			filepath.Base(migrationPath),
+		).Scan(&migrationCount); err != nil {
+			t.Fatalf("count migration record for %s: %v", migrationPath, err)
+		}
+		if migrationCount != 1 {
+			t.Fatalf("migration count for %s = %d, want 1", migrationPath, migrationCount)
+		}
 	}
 }

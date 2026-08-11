@@ -47,3 +47,13 @@ type StorageUsage struct {
 	QuotaBytes     int64 `json:"quota_bytes"`
 	AvailableBytes int64 `json:"available_bytes"`
 }
+
+type FilePreview struct {
+	FileObjectID int64     `json:"file_object_id"`
+	StoragePath  string    `json:"storage_path"`
+	Size         int64     `json:"size"`
+	ContentType  string    `json:"content_type"`
+	Width        int       `json:"width"`
+	Height       int       `json:"height"`
+	CreatedAt    time.Time `json:"created_at"`
+}

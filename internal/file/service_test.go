@@ -19,6 +19,7 @@ type fakeStorage struct {
 	savedPath    string
 	savedContent string
 	deletedPath  string
+	deletedPaths []string
 	saveErr      error
 	openErr      error
 	deleteErr    error
@@ -87,6 +88,7 @@ func (s *fakeStorage) Open(storagePath string) (io.ReadSeekCloser, error) {
 
 func (s *fakeStorage) Delete(storagePath string) error {
 	s.deletedPath = storagePath
+	s.deletedPaths = append(s.deletedPaths, storagePath)
 	return s.deleteErr
 }
 
@@ -167,6 +169,7 @@ func newTestServiceWithStorageQuotaAndOptions(
 		"../../migrations/002_file_objects.sql",
 		"../../migrations/005_folders.sql",
 		"../../migrations/007_file_shares.sql",
+		"../../migrations/010_file_preview.sql",
 	); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}
@@ -398,6 +401,50 @@ func TestServicePermanentlyDeleteSucceedsWhenStorageCleanupFails(t *testing.T) {
 	}
 	if _, err := service.repo.FindDeletedByID(1, file.ID); !errors.Is(err, ErrFileNotFound) {
 		t.Fatalf("find permanently deleted file error = %v, want %v", err, ErrFileNotFound)
+	}
+}
+
+func TestServicePermanentlyDeleteRemovesPreviewStorage(t *testing.T) {
+	storage := &fakeStorage{}
+	service := newTestServiceWithStorage(t, storage)
+
+	object, err := service.repo.CreateFileObject(
+		"preview-cleanup-hash",
+		"uploads/source.png",
+		100,
+		"image/png",
+	)
+	if err != nil {
+		t.Fatalf("create source object: %v", err)
+	}
+	file, err := service.repo.CreateWithObject(1, "source.png", object)
+	if err != nil {
+		t.Fatalf("create user file: %v", err)
+	}
+	if _, err := service.repo.CreateFilePreview(&FilePreview{
+		FileObjectID: object.ID,
+		StoragePath:  "uploads/source-preview.png",
+		Size:         50,
+		ContentType:  "image/png",
+		Width:        320,
+		Height:       160,
+	}); err != nil {
+		t.Fatalf("create preview: %v", err)
+	}
+	if err := service.SoftDelete(1, file.ID); err != nil {
+		t.Fatalf("soft delete file: %v", err)
+	}
+
+	if err := service.PermanentlyDelete(1, file.ID); err != nil {
+		t.Fatalf("permanently delete file: %v", err)
+	}
+
+	deleted := make(map[string]bool, len(storage.deletedPaths))
+	for _, storagePath := range storage.deletedPaths {
+		deleted[storagePath] = true
+	}
+	if !deleted[object.StoragePath] || !deleted["uploads/source-preview.png"] {
+		t.Fatalf("deleted storage paths = %#v, want source and preview", storage.deletedPaths)
 	}
 }
 

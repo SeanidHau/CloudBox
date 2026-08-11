@@ -125,6 +125,62 @@ func TestMigrateBackfillsLegacyFilesIntoFileObjects(t *testing.T) {
 	}
 }
 
+func TestMigrateFilePreviewsEnforcesConstraintsAndCascades(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+
+	// SQLite only applies foreign-key actions after this connection-level setting.
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+
+	if err := Migrate(
+		db,
+		"../../migrations/001_init.sql",
+		"../../migrations/002_file_objects.sql",
+		"../../migrations/010_file_preview.sql",
+	); err != nil {
+		t.Fatalf("apply file preview migration: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO file_objects (id, file_hash, storage_path, size, content_type)
+		VALUES (1, 'source-hash', 'uploads/source.png', 100, 'image/png')
+	`); err != nil {
+		t.Fatalf("insert file object: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO file_previews (file_object_id, storage_path, size, content_type, width, height)
+		VALUES (1, 'uploads/source-preview.jpg', 50, 'image/jpeg', 320, 240)
+	`); err != nil {
+		t.Fatalf("insert file preview: %v", err)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO file_previews (file_object_id, storage_path, size, content_type, width, height)
+		VALUES (2, 'uploads/invalid-preview.jpg', 50, 'image/jpeg', 0, 240)
+	`); err == nil {
+		t.Fatal("expected zero preview width to fail")
+	}
+
+	if _, err := db.Exec(`DELETE FROM file_objects WHERE id = 1`); err != nil {
+		t.Fatalf("delete file object: %v", err)
+	}
+
+	var previewCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM file_previews`).Scan(&previewCount); err != nil {
+		t.Fatalf("count previews: %v", err)
+	}
+	if previewCount != 0 {
+		t.Fatalf("preview count = %d, want cascade to remove it", previewCount)
+	}
+}
+
 func TestMigrateCreatesUploadTasksAndChunks(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
 	if err != nil {

@@ -178,6 +178,7 @@ func (s *Service) UploadIntoFolder(
 	}
 
 	s.invalidateStorageUsageCache(userID)
+	s.enqueueThumbnailIfSupported(userID, file.ID, object)
 
 	return file, nil
 }
@@ -215,6 +216,23 @@ func (s *Service) OpenForDownload(userID int64, fileID int64) (*UserFile, io.Rea
 	}
 
 	return file, reader, nil
+}
+
+func (s *Service) OpenThumbnailForDownload(
+	userID int64,
+	fileID int64,
+) (*FilePreview, io.ReadSeekCloser, error) {
+	preview, err := s.repo.FindFilePreviewForActiveFile(userID, fileID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	reader, err := s.storage.Open(preview.StoragePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return preview, reader, nil
 }
 
 func (s *Service) VerifyActiveFile(ctx context.Context, fileID int64) error {
@@ -278,25 +296,37 @@ func (s *Service) Restore(userID int64, fileID int64) error {
 }
 
 func (s *Service) PermanentlyDelete(userID int64, fileID int64) error {
-	object, err := s.repo.PermanentlyDeleteDeleted(userID, fileID)
+	unreferenced, err := s.repo.PermanentlyDeleteDeleted(userID, fileID)
 	if err != nil {
 		return err
 	}
 
 	s.invalidateStorageUsageCache(userID)
 
-	if object == nil {
+	if unreferenced == nil {
 		return nil
 	}
 
-	if err := s.storage.Delete(object.StoragePath); err != nil {
+	if err := s.storage.Delete(unreferenced.Object.StoragePath); err != nil {
 		slog.Error(
 			"delete unreferenced file object failed",
-			"object_id", object.ID,
+			"object_id", unreferenced.Object.ID,
 			"user_id", userID,
-			"storage_path", object.StoragePath,
+			"storage_path", unreferenced.Object.StoragePath,
 			"error", err,
 		)
+	}
+
+	if unreferenced.Preview != nil {
+		if err := s.storage.Delete(unreferenced.Preview.StoragePath); err != nil {
+			slog.Error(
+				"delete unreferenced file preview failed",
+				"object_id", unreferenced.Object.ID,
+				"user_id", userID,
+				"storage_path", unreferenced.Preview.StoragePath,
+				"error", err,
+			)
+		}
 	}
 
 	return nil
@@ -365,6 +395,7 @@ func (s *Service) InstantUploadIntoFolder(
 	}
 
 	s.invalidateStorageUsageCache(userID)
+	s.enqueueThumbnailIfSupported(userID, file.ID, object)
 
 	return file, nil
 }
@@ -585,4 +616,39 @@ func (s *Service) EnsureStorageQuota(
 	}
 
 	return nil
+}
+
+func (s *Service) enqueueThumbnailIfSupported(
+	userID int64,
+	fileID int64,
+	object *FileObject,
+) {
+	if s.jobEnqueuer == nil || object == nil || !SupportsThumbnail(object.ContentType) {
+		return
+	}
+
+	if _, err := s.repo.FindFilePreviewByObjectID(object.ID); err == nil {
+		return
+	} else if !errors.Is(err, ErrFilePreviewNotFound) {
+		slog.Error(
+			"check existing file preview",
+			"file_id", fileID,
+			"object_id", object.ID,
+			"error", err,
+		)
+		return
+	}
+
+	if _, err := s.jobEnqueuer.EnqueueForUser(
+		userID,
+		jobmodule.TypeGenerateThumbnail,
+		ThumbnailPayload{FileID: fileID},
+	); err != nil {
+		slog.Error(
+			"enqueue thumbnail job",
+			"file_id", fileID,
+			"object_id", object.ID,
+			"error", err,
+		)
+	}
 }

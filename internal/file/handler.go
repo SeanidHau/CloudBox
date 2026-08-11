@@ -193,6 +193,35 @@ func (h *Handler) Download(c *gin.Context) {
 	http.ServeContent(c.Writer, c.Request, userFile.OriginalName, userFile.CreatedAt, reader)
 }
 
+func (h *Handler) DownloadThumbnail(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	fileID, err := parseFileID(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid file id"})
+		return
+	}
+
+	preview, reader, err := h.service.OpenThumbnailForDownload(userID, fileID)
+	if errors.Is(err, ErrFilePreviewNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "file preview not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to open preview file"})
+		return
+	}
+	defer reader.Close()
+
+	c.Header("Content-Disposition", `inline; filename="thumbnail.png"`)
+	c.Header("Content-Type", preview.ContentType)
+	http.ServeContent(c.Writer, c.Request, "thumbnail.png", preview.CreatedAt, reader)
+}
+
 func (h *Handler) SoftDelete(c *gin.Context) {
 	userID, ok := middleware.CurrentUserID(c)
 	if !ok {
