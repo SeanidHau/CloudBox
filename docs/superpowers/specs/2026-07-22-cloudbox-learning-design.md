@@ -1,71 +1,71 @@
-# CloudBox Learning Project Design
+# CloudBox 学习项目设计（历史归档）
 
-Date: 2026-07-22
+> 日期：2026-07-22
+>
+> 本文是项目启动时的学习设计记录。阶段划分、目录和计划中的未实现项保留原始含义，不代表当前功能状态。当前实现见 [README.md](../../../README.md) 和 [项目概况.md](../../../项目概况.md)。
 
-## Goal
+## 项目目标
 
-CloudBox is a Go learning project that starts as a small file storage API and grows into a resume-ready distributed file storage and sharing platform.
+CloudBox 从小型文件存储 API 开始，逐步演进为用于学习的文件存储和分享平台。
 
-The learning path has three stages:
+原始学习路径分为三个阶段：
 
-1. Stage 1: learn Go web development through a small but complete backend.
-2. Stage 2: add resume-level file storage features.
-3. Stage 3: add engineering maturity, observability, async processing, and deployment practices.
+1. 阶段 1：通过一个小而完整的后端学习 Go Web 开发。
+2. 阶段 2：增加适合作为项目经历的文件存储功能。
+3. 阶段 3：增加工程化、可观测性、异步处理和部署实践。
 
-Stage 1 is the immediate implementation target.
+当时的直接目标是完成阶段 1。
 
-## Stage 1 Scope
+## 阶段 1 范围
 
-Stage 1 uses:
+阶段 1 使用：
 
 - Go
 - Gin
 - SQLite
-- Local disk storage
-- JWT authentication
+- 本地磁盘存储
+- JWT 认证
 
-Stage 1 implements:
+阶段 1 实现：
 
-- User registration
-- User login
-- JWT-protected file APIs
-- Small file upload
-- File download
-- File list
-- Soft delete
-- Trash list
-- Restore from trash
+- 用户注册。
+- 用户登录。
+- 受 JWT 保护的文件 API。
+- 小文件上传。
+- 文件下载。
+- 文件列表。
+- 软删除。
+- 回收站列表。
+- 回收站恢复。
 
-Stage 1 intentionally excludes:
+阶段 1 明确不包含：
 
-- Chunked upload
-- Resume upload
-- Instant upload by hash
-- Redis
-- MinIO
-- PostgreSQL
-- Share links
-- Folder hierarchy
-- Async workers
-- Frontend UI
+- 分片上传。
+- 断点续传。
+- 基于哈希的秒传。
+- Redis。
+- MinIO。
+- PostgreSQL。
+- 分享链接。
+- 文件夹树。
+- 异步 Worker。
+- Web 前端。
 
-This keeps the first version focused on Go fundamentals, HTTP routing, database access, layered architecture, and streaming file I/O.
+该范围用于聚焦 Go 基础、HTTP 路由、数据库访问、分层设计和流式文件 I/O。
 
-## Recommended Approach
+## 推荐架构
 
-Use a layered monolith.
+使用分层单体服务：
 
-The API should stay in one Go service, but the code should already be split by responsibility:
+- Handler 解析 HTTP 输入并返回 HTTP 响应。
+- Service 承载业务规则。
+- Repository 访问 SQLite。
+- Storage 读取和写入本地文件。
+- Middleware 处理认证。
 
-- Handlers parse HTTP input and return HTTP responses.
-- Services hold business logic.
-- Repositories handle SQLite queries.
-- Storage handles local file reads and writes.
-- Middleware handles authentication.
+该结构保持阶段 1 的学习难度，同时为阶段 2 的 PostgreSQL、MinIO 和 Redis 替换预留边界。
 
-This makes Stage 1 easy enough for learning while keeping the code ready for Stage 2 changes such as PostgreSQL, MinIO, and Redis.
-
-## Project Structure
+## 初始目录设计
 
 ```text
 cloudbox/
@@ -99,46 +99,48 @@ cloudbox/
 └── README.md
 ```
 
-## Data Model
+该目录是阶段 1 的计划结构，不等同于当前仓库结构。
 
-Stage 1 keeps the data model small:
+## 初始数据模型
 
-### users
+阶段 1 使用两张表：
 
-- id
-- username
-- password_hash
-- created_at
+### `users`
 
-### user_files
+- `id`
+- `username`
+- `password_hash`
+- `created_at`
 
-- id
-- user_id
-- original_name
-- storage_path
-- size
-- content_type
-- status
-- created_at
-- deleted_at
+### `user_files`
 
-The `status` field should use simple values:
+- `id`
+- `user_id`
+- `original_name`
+- `storage_path`
+- `size`
+- `content_type`
+- `status`
+- `created_at`
+- `deleted_at`
+
+`status` 使用：
 
 - `active`
 - `deleted`
 
-Stage 2 can split physical storage metadata into `file_objects` and user-visible file records. Stage 1 keeps one `user_files` table so the first implementation is easier to understand.
+原始设计计划在阶段 2 将物理存储元数据拆分为 `file_objects` 与用户可见文件记录。
 
-## API Design
+## 初始 API 设计
 
-Public routes:
+公开路由：
 
 ```text
 POST /api/auth/register
 POST /api/auth/login
 ```
 
-Authenticated routes:
+受认证保护的路由：
 
 ```text
 POST   /api/files
@@ -149,29 +151,29 @@ DELETE /api/files/:id
 POST   /api/files/:id/restore
 ```
 
-## Upload Flow
+## 上传流程
 
-1. The client sends `multipart/form-data` to `POST /api/files`.
-2. The auth middleware extracts the user ID from the JWT.
-3. The file handler validates that a file is present.
-4. The file service asks local storage to save the uploaded stream.
-5. The repository inserts a metadata row into SQLite.
-6. The API returns the saved file metadata.
+1. 客户端向 `POST /api/files` 发送 `multipart/form-data`。
+2. 认证中间件从 JWT 提取用户 ID。
+3. 文件 Handler 验证请求中存在文件。
+4. 文件 Service 请求本地存储保存上传流。
+5. Repository 向 SQLite 插入元数据。
+6. API 返回保存后的文件元数据。
 
-The file content must be copied as a stream. The implementation should not read the full file into memory.
+文件内容必须通过流复制。实现不应将完整文件读入内存。
 
-## Download Flow
+## 下载流程
 
-1. The client requests `GET /api/files/:id/download`.
-2. The service checks that the file belongs to the authenticated user and is not deleted.
-3. The storage layer opens the local file.
-4. The handler streams the file back to the client.
+1. 客户端请求 `GET /api/files/:id/download`。
+2. Service 验证文件属于当前认证用户且未删除。
+3. Storage 打开本地文件。
+4. Handler 将文件流返回给客户端。
 
-Stage 1 does not need HTTP Range support. That belongs in Stage 2.
+阶段 1 不要求 HTTP Range 下载。该能力规划在阶段 2。
 
-## Error Handling
+## 错误处理
 
-Handlers should return consistent JSON errors:
+Handler 返回统一 JSON 错误：
 
 ```json
 {
@@ -179,69 +181,63 @@ Handlers should return consistent JSON errors:
 }
 ```
 
-Expected status codes:
+原始预期状态码：
 
-- `400` for invalid input
-- `401` for missing or invalid authentication
-- `403` for forbidden access
-- `404` for missing files
-- `409` for duplicate usernames
-- `500` for unexpected server errors
+- `400`：输入无效。
+- `401`：缺少认证或认证无效。
+- `403`：禁止访问。
+- `404`：文件不存在。
+- `409`：用户名重复。
+- `500`：未预期的服务器错误。
 
-Business errors should be represented as typed or sentinel errors in service packages so handlers can map them to HTTP status codes.
+业务错误应在 Service 包中使用类型错误或哨兵错误表示，Handler 根据错误映射 HTTP 状态。
 
-## Testing Strategy
+## 初始测试策略
 
-Stage 1 should include focused tests for:
+阶段 1 应覆盖：
 
-- Password hashing and login validation
-- JWT creation and parsing
-- File repository CRUD behavior
-- File service ownership checks
+- 密码哈希和登录校验。
+- JWT 创建和解析。
+- 文件 Repository CRUD。
+- 文件 Service 所有权校验。
 
-Full HTTP integration tests are useful but can come after the first working version.
+完整 HTTP 集成测试可在第一个可运行版本后补充。
 
-## Stage 2 Direction
+## 阶段 2 方向
 
-Stage 2 upgrades the project into a resume-ready file storage system:
+- 使用 PostgreSQL 替换 SQLite。
+- 使用 MinIO 替换本地磁盘。
+- 拆分 `user_files` 和 `file_objects`。
+- 增加 SHA-256 文件哈希。
+- 增加秒传。
+- 增加分片上传。
+- 增加断点续传。
+- 增加 HTTP Range 下载。
+- 增加带密码、过期时间和下载次数上限的分享链接。
+- 使用 Redis 保存上传状态、限流和热点元数据。
 
-- Replace SQLite with PostgreSQL.
-- Replace local disk storage with MinIO.
-- Split `user_files` and `file_objects`.
-- Add SHA-256 file hashing.
-- Add instant upload when the same content already exists.
-- Add chunked upload.
-- Add resume upload.
-- Add HTTP Range download.
-- Add share links with password, expiry, and download limit.
-- Add Redis for upload state, rate limiting, and hot metadata.
+## 阶段 3 方向
 
-## Stage 3 Direction
+- Redis Streams 异步 Worker。
+- 缩略图生成。
+- 失败任务重试。
+- 过期上传清理。
+- Prometheus 指标。
+- OpenTelemetry 追踪。
+- 结构化日志。
+- 压测。
+- GitHub Actions。
+- Docker Compose。
+- Kubernetes 部署说明。
 
-Stage 3 adds engineering maturity:
+## 阶段 1 完成标准
 
-- Redis Streams async workers.
-- Thumbnail generation.
-- Failed task retry.
-- Expired upload cleanup.
-- Prometheus metrics.
-- OpenTelemetry tracing.
-- Structured logging.
-- Load testing.
-- GitHub Actions.
-- Docker Compose.
-- Kubernetes deployment notes.
-
-## Success Criteria For Stage 1
-
-Stage 1 is complete when:
-
-- The API starts with one command.
-- A user can register and log in.
-- Authenticated users can upload a file.
-- Authenticated users can list only their own files.
-- Authenticated users can download only their own active files.
-- Deleting a file moves it to trash instead of removing the row.
-- Deleted files can be listed and restored.
-- File bytes are stored on local disk and metadata is stored in SQLite.
-- The README explains how to run and test the project.
+- API 可以通过一条命令启动。
+- 用户可以注册和登录。
+- 已认证用户可以上传文件。
+- 已认证用户只能查询自己的文件。
+- 已认证用户只能下载自己的活跃文件。
+- 删除将文件移入回收站，而不是直接删除数据库行。
+- 已删除文件可以查询和恢复。
+- 文件字节保存在本地磁盘，元数据保存在 SQLite。
+- README 说明运行和测试方式。
