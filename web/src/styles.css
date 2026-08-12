@@ -136,6 +136,10 @@ input:focus, select:focus { border-color: #1671d9; box-shadow: 0 0 0 3px #1671d9
 .public-collection-file > span { min-width: 0; display: grid; gap: 3px; }
 .public-collection-file strong { overflow: hidden; color: #33445d; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .public-collection-file small { color: #8492a5; font-size: 11px; }
+.public-collection-save { display: grid; gap: 10px; margin-top: 22px; padding: 17px; background: #f5faff; border: 1px solid #d8e9fa; border-radius: 6px; }
+.public-collection-save strong { color: #334863; font-size: 14px; }
+.public-collection-save p { margin: 0; color: #71829a; font-size: 12px; line-height: 1.6; }
+.public-collection-saved { display: flex; align-items: center; gap: 6px; color: #267259 !important; }
 .share-collection-file-list { display: grid; gap: 7px; max-height: 132px; padding: 10px; overflow-y: auto; color: #61718a; background: #f7f9fc; border: 1px solid #e1e8f1; border-radius: 6px; }
 .share-collection-file-list span { display: flex; min-width: 0; align-items: center; gap: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 @media (max-width: 760px) {

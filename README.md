@@ -71,7 +71,7 @@ npm run dev
 - 根目录与子目录浏览、创建目录、重命名、移动与空目录删除。
 - 小文件直接上传；大于 `5 MB` 的文件自动走分片初始化、逐块上传和合并完成接口。
 - 文件搜索、下载、回收站恢复/永久删除；选择多个文件后可批量移入回收站或创建一个合并分享链接。
-- 分享页支持单文件和多文件合并分享。公开访问者验证密码后可查看文件清单；下载仍要求登录。
+- 分享页支持单文件和多文件合并分享。公开访问者验证密码后可查看文件清单；登录后可逐个下载或一次保存全部文件到自己的目录。
 - 存储用量展示，以及使用鉴权请求读取图片缩略图。
 
 前端不伪造病毒扫描状态。扫描未完成时，下载或缩略图接口返回 `423`，前端会提示当前文件暂不可用；扫描未通过时按后端返回的 `403` 提示处理。文件详情中的“发起完整性校验”调用的是 `file.verify` 后台任务，不是病毒扫描任务。
@@ -83,7 +83,7 @@ cd web
 npm run build
 ```
 
-输出目录为 `web/dist/`。当前 Docker 镜像只部署 Go API；Web 静态资源应由独立静态服务器或后续部署配置提供。
+输出目录为 `web/dist/`。`compose.production.yaml` 会通过 Caddy 托管该目录，并将 `/api` 反向代理到 Go API。
 
 ## 配置
 
@@ -205,6 +205,39 @@ docker compose \
   up --build -d
 ```
 
+### 生产部署
+
+生产配置使用 PostgreSQL、MinIO、Go API 和 Caddy。Caddy 托管前端静态资源、反向代理 API，并在域名解析和 80/443 端口可达时自动申请与续期 HTTPS 证书。
+
+部署前需要完成以下准备：
+
+1. 将域名的 A/AAAA 记录指向服务器。
+2. 在服务器防火墙放行 TCP `80` 和 `443`。
+3. 创建 `.env`，并设置 `CLOUDBOX_DOMAIN`、`JWT_SECRET`、PostgreSQL 与 MinIO 的强随机密码。生产环境不要保留 `.env.example` 中的示例值。
+4. 确认服务器已安装 Docker Engine 和 Docker Compose 插件。
+
+启动：
+
+```bash
+docker compose -f compose.production.yaml config --quiet
+docker compose -f compose.production.yaml up --build -d
+```
+
+验证：
+
+```bash
+curl -f https://$CLOUDBOX_DOMAIN/health
+docker compose -f compose.production.yaml ps
+```
+
+生产配置只公开 Caddy 的 `80/443`。PostgreSQL、MinIO 和 API 仅在 Compose 内部网络可见；不要为了排障直接暴露它们的端口。数据保存在命名 volume 中，升级前应备份 PostgreSQL 数据库和 MinIO 数据卷。
+
+停止服务：
+
+```bash
+docker compose -f compose.production.yaml down
+```
+
 ## API 概览
 
 除认证接口和公开分享下载外，所有 `/api` 路由需要：
@@ -253,6 +286,7 @@ Authorization: Bearer <JWT>
 | 保存分享副本 | `POST /api/shares/:token/save` |
 | 查看公开合并分享 | `GET /api/share-collections/:token`，可选 `X-Share-Password` |
 | 下载合并分享中的文件 | `GET /api/share-collections/:token/files/:id/download`，需要登录，可选 `X-Share-Password` |
+| 保存合并分享全部副本 | `POST /api/share-collections/:token/save`，需要登录，请求体可包含 `password`、`parent_id` |
 | 初始化分片上传 | `POST /api/uploads/init` |
 | 上传分片 | `PUT /api/uploads/:id/chunks/:number` |
 | 查询上传状态 | `GET /api/uploads/:id` |
@@ -294,6 +328,8 @@ POST /api/uploads/:id/complete
 公开分享的下载和保存副本按分享 token 与匿名化 IP 分别限速：单 IP 最多 20 次/分钟。密码连续错误 5 次后，该 IP 在该分享上锁定 10 分钟。系统审计 token、匿名化 IP、动作、结果和时间，不记录原始 IP。
 
 合并分享为至少两个同一所有者的活跃文件创建一个统一链接，并共享密码、有效期和下载次数上限。访问者通过验证后只能查看该链接内的文件清单；每下载一个文件都会消耗一次该链接的下载额度。任意源文件移入回收站后，整个合并链接立即失效，避免链接继续暴露不完整的文件集合。
+
+登录用户可将合并分享中的全部文件保存为自己的文件记录。保存前会统一检查目标目录和总逻辑容量；创建记录与对象引用计数在同一个事务中完成。容量不足或任一数据库操作失败时，不会保存任何文件，并会回退本次预留的下载次数。
 
 限制状态目前保存在 API 进程内，适合单实例部署。后续部署多个 API 实例时，应改用 Redis 等共享存储保存限速和锁定状态。
 

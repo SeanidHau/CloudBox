@@ -302,6 +302,50 @@ func TestHandlerSaveSharedFile(t *testing.T) {
 	}
 }
 
+func TestHandlerSaveSharedCollection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := newTestRepository(t)
+	firstID := createTestFile(t, repo, 1, "active")
+	secondID := createTestFile(t, repo, 1, "active")
+	fileService := filemodule.NewService(filemodule.NewRepository(repo.db), nil, 1024)
+	service := NewService(repo, nil, WithFileSaver(fileService))
+	collection, err := service.CreateCollection(1, []int64{firstID, secondID}, "collection-password", nil, nil)
+	if err != nil {
+		t.Fatalf("create collection: %v", err)
+	}
+
+	router := gin.New()
+	router.POST("/api/share-collections/:token/save", func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, int64(2))
+		NewHandler(service).SaveCollection(c)
+	})
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/share-collections/"+collection.Token+"/save",
+		strings.NewReader(`{"password":"collection-password"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("save collection status = %d, want %d: %s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	var response struct {
+		Files []filemodule.UserFile `json:"files"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode saved collection: %v", err)
+	}
+	if len(response.Files) != 2 {
+		t.Fatalf("saved file count = %d, want 2", len(response.Files))
+	}
+	for _, file := range response.Files {
+		if file.UserID != 2 {
+			t.Fatalf("saved file user ID = %d, want 2", file.UserID)
+		}
+	}
+}
+
 func TestHandlerDownloadReturnsLockedWhenPolicyRejectsFile(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

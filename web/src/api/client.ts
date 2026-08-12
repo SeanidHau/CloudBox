@@ -188,6 +188,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ password, parent_id: parentId })
     }),
+  saveSharedCollection: (token: string, password: string, parentId: number | null) =>
+    request<{ files: UserFile[] }>(`/api/share-collections/${encodeURIComponent(token)}/save`, {
+      method: "POST",
+      body: JSON.stringify({ password, parent_id: parentId })
+    }),
   enqueueVerification: (id: number) => request<{ job: BackgroundJob }>(`/api/files/${id}/verify`, { method: "POST" }),
   getJob: (id: string) => request<{ job: BackgroundJob }>(`/api/jobs/${id}`),
   initUpload: (file: File, parentId: number | null, chunkSize: number) =>

@@ -108,7 +108,8 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
       writeSession(next);
       onAuthenticated(next);
       const pendingDownload = sessionStorage.getItem("cloudbox.pending-share-download")
-        || sessionStorage.getItem("cloudbox.pending-share-collection-download");
+        || sessionStorage.getItem("cloudbox.pending-share-collection-download")
+        || sessionStorage.getItem("cloudbox.pending-share-collection-save");
       const destination = new URLSearchParams(location.search).get("next");
       navigate(pendingDownload && destination?.startsWith("/share") ? destination : "/files", { replace: true });
     } catch (err) {
@@ -293,6 +294,10 @@ function PublicShareCollectionPage() {
   const [collection, setCollection] = useState<PublicShareCollection | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [folders, setFolders] = useState<FolderType[]>([]);
+  const [parentID, setParentID] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [savedCount, setSavedCount] = useState<number | null>(null);
 
   useEffect(() => {
     const pending = sessionStorage.getItem("cloudbox.pending-share-collection-download");
@@ -308,6 +313,13 @@ function PublicShareCollectionPage() {
     }
   }, [token]);
 
+  useEffect(() => {
+    if (!readSession()) return;
+    void api.listFolders(null)
+      .then((result) => setFolders(result.folders))
+      .catch(() => setFolders([]));
+  }, []);
+
   async function unlock(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true); setError("");
@@ -321,7 +333,49 @@ function PublicShareCollectionPage() {
     }
     try { await api.downloadCollectionFile(token, file.id ?? 0, password); } catch (err) { setError(messageOf(err)); }
   }
-  return <main className="public-share-page"><header className="public-share-header"><div className="brand-inline"><span className="brand-mark"><Cloud size={18} /></span>CloudBox</div></header><section className="public-share-card public-collection-card"><div className="public-share-icon"><Share2 size={28} /></div><p className="eyebrow">SHARED COLLECTION</p><h1>{collection ? `分享了 ${collection.files.length} 个文件` : "有人向你分享了一组文件"}</h1><p className="public-share-copy">验证访问权限后可查看文件目录。下载文件需要登录。</p>{!collection ? <form className="public-share-form" onSubmit={unlock}><label>访问密码 <span className="optional">如有</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="未设置密码则留空" /></label>{error && <p className="form-error">{error}</p>}<button className="primary-button public-share-download" type="submit" disabled={loading}>{loading ? <LoaderCircle size={17} className="spin" /> : <ShieldCheck size={17} />}{loading ? "正在验证" : "查看分享内容"}</button></form> : <div className="public-collection-list">{collection.files.map((file) => <div className="public-collection-file" key={file.id ?? file.original_name}><FileKindIcon file={{ id: file.id ?? 0, user_id: 0, parent_id: null, original_name: file.original_name, storage_path: "", size: file.size, content_type: file.content_type, status: "active", availability: "ready", created_at: "" }} /><span><strong>{file.original_name}</strong><small>{formatBytes(file.size)} · {shortType(file.content_type)}</small></span><button className="secondary-button compact" type="button" onClick={() => void download(file)}>下载</button></div>)}</div>}{collection && error && <p className="form-error">{error}</p>}</section></main>;
+
+  async function saveAll() {
+    if (!readSession()) {
+      sessionStorage.setItem("cloudbox.pending-share-collection-save", JSON.stringify({ token, password, parentID }));
+      navigate(`/login?next=${encodeURIComponent(`/share-collection/${token}`)}`, { replace: true });
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const result = await api.saveSharedCollection(token, password, parentID);
+      setSavedCount(result.files.length);
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  useEffect(() => {
+    const pending = sessionStorage.getItem("cloudbox.pending-share-collection-save");
+    if (!pending || !readSession()) return;
+    try {
+      const parsed = JSON.parse(pending) as { token?: string; password?: string; parentID?: number | null };
+      if (parsed.token !== token) return;
+      sessionStorage.removeItem("cloudbox.pending-share-collection-save");
+      setPassword(parsed.password ?? "");
+      setParentID(parsed.parentID ?? null);
+      void Promise.all([
+        api.publicShareCollection(token, parsed.password ?? ""),
+        api.saveSharedCollection(token, parsed.password ?? "", parsed.parentID ?? null)
+      ])
+        .then(([shared, result]) => {
+          setCollection(shared.collection);
+          setSavedCount(result.files.length);
+        })
+        .catch((err) => setError(messageOf(err)));
+    } catch {
+      sessionStorage.removeItem("cloudbox.pending-share-collection-save");
+    }
+  }, [token]);
+
+  return <main className="public-share-page"><header className="public-share-header"><div className="brand-inline"><span className="brand-mark"><Cloud size={18} /></span>CloudBox</div></header><section className="public-share-card public-collection-card"><div className="public-share-icon"><Share2 size={28} /></div><p className="eyebrow">SHARED COLLECTION</p><h1>{collection ? `分享了 ${collection.files.length} 个文件` : "有人向你分享了一组文件"}</h1><p className="public-share-copy">验证访问权限后可查看文件目录。下载或保存文件需要登录。</p>{!collection ? <form className="public-share-form" onSubmit={unlock}><label>访问密码 <span className="optional">如有</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="未设置密码则留空" /></label>{error && <p className="form-error">{error}</p>}<button className="primary-button public-share-download" type="submit" disabled={loading}>{loading ? <LoaderCircle size={17} className="spin" /> : <ShieldCheck size={17} />}{loading ? "正在验证" : "查看分享内容"}</button></form> : <><div className="public-collection-list">{collection.files.map((file) => <div className="public-collection-file" key={file.id ?? file.original_name}><FileKindIcon file={{ id: file.id ?? 0, user_id: 0, parent_id: null, original_name: file.original_name, storage_path: "", size: file.size, content_type: file.content_type, status: "active", availability: "ready", created_at: "" }} /><span><strong>{file.original_name}</strong><small>{formatBytes(file.size)} · {shortType(file.content_type)}</small></span><button className="secondary-button compact" type="button" onClick={() => void download(file)}>下载</button></div>)}</div><section className="public-collection-save"><strong>保存全部到我的文件</strong><p>将 {collection.files.length} 个文件一次性保存为自己的副本。</p>{readSession() && <label>保存到<select value={parentID ?? "root"} onChange={(event) => setParentID(event.target.value === "root" ? null : Number(event.target.value))}><option value="root">我的文件（根目录）</option>{folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label>}<button className="primary-button public-share-download" type="button" onClick={() => void saveAll()} disabled={saving}>{saving ? <LoaderCircle size={17} className="spin" /> : <Download size={17} />}{saving ? "正在保存" : readSession() ? "保存全部文件" : "登录后保存全部"}</button>{savedCount !== null && <p className="public-collection-saved"><Check size={15} />已保存 {savedCount} 个文件到我的文件。</p>}</section></>}{collection && error && <p className="form-error">{error}</p>}</section></main>;
 }
 
 function Workspace({ session, onLogout }: { session: Session; onLogout: () => void }) {

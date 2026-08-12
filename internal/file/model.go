@@ -59,6 +59,13 @@ type StorageUsage struct {
 	AvailableBytes int64 `json:"available_bytes"`
 }
 
+// InstantUploadInput describes an existing object that should be added to a
+// user's workspace without copying its bytes again.
+type InstantUploadInput struct {
+	OriginalName string
+	FileHash     string
+}
+
 type SearchFilter struct {
 	Query         string
 	Kind          string

@@ -356,6 +356,7 @@ func main() {
 	ready.POST("/files/:id/shares", shareHandler.Create)
 	ready.POST("/share-collections", shareHandler.CreateCollection)
 	ready.POST("/shares/:token/save", shareHandler.Save)
+	ready.POST("/share-collections/:token/save", shareHandler.SaveCollection)
 	ready.GET("/shares/:token/download", shareHandler.Download)
 	ready.GET("/share-collections/:token/files/:id/download", shareHandler.DownloadCollectionFile)
 	ready.GET("/shares", shareHandler.List)

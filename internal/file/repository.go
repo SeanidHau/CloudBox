@@ -794,6 +794,106 @@ func (r *Repository) CreateWithObjectInFolder(
 	return r.FindActiveByID(userID, fileID)
 }
 
+// CreateManyWithObjectsInFolder creates all logical file references in one
+// transaction. The quota check is intentionally inside the transaction so a
+// collection save cannot leave a partial set of files behind.
+func (r *Repository) CreateManyWithObjectsInFolder(
+	userID int64,
+	parentID *int64,
+	objects []*FileObject,
+	originalNames []string,
+	quotaBytes int64,
+) ([]UserFile, error) {
+	if len(objects) == 0 || len(objects) != len(originalNames) {
+		return nil, ErrFileObjectNotFound
+	}
+
+	tx, err := r.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// A no-op update takes a row lock in PostgreSQL and a write lock in SQLite.
+	// It serializes quota decisions for one recipient without using database-
+	// specific locking syntax.
+	userResult, err := tx.Exec(`UPDATE users SET username = username WHERE id = $1`, userID)
+	if err != nil {
+		return nil, err
+	}
+	userAffected, err := userResult.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if userAffected != 1 {
+		return nil, ErrFileNotFound
+	}
+
+	if parentID != nil {
+		var exists bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM folders WHERE id = $1 AND user_id = $2)`, *parentID, userID).Scan(&exists); err != nil {
+			return nil, err
+		}
+		if !exists {
+			return nil, ErrFolderNotFound
+		}
+	}
+
+	var usedBytes int64
+	if err := tx.QueryRow(`SELECT COALESCE(SUM(size), 0) FROM user_files WHERE user_id = $1 AND status = $2`, userID, StatusActive).Scan(&usedBytes); err != nil {
+		return nil, err
+	}
+	var additionalBytes int64
+	for _, object := range objects {
+		additionalBytes += object.Size
+	}
+	if usedBytes > quotaBytes || additionalBytes > quotaBytes-usedBytes {
+		return nil, ErrStorageQuotaExceeded
+	}
+
+	files := make([]UserFile, 0, len(objects))
+	for index, object := range objects {
+		var file UserFile
+		if err := tx.QueryRow(
+			`INSERT INTO user_files (user_id, parent_id, object_id, original_name, storage_path, size, content_type, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, created_at`,
+			userID,
+			parentID,
+			object.ID,
+			originalNames[index],
+			object.StoragePath,
+			object.Size,
+			object.ContentType,
+			StatusActive,
+		).Scan(&file.ID, &file.CreatedAt); err != nil {
+			return nil, err
+		}
+		result, err := tx.Exec(`UPDATE file_objects SET reference_count = reference_count + 1 WHERE id = $1`, object.ID)
+		if err != nil {
+			return nil, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if affected != 1 {
+			return nil, ErrFileObjectNotFound
+		}
+		file.UserID = userID
+		file.ParentID = parentID
+		file.OriginalName = originalNames[index]
+		file.StoragePath = object.StoragePath
+		file.Size = object.Size
+		file.ContentType = object.ContentType
+		file.Status = StatusActive
+		files = append(files, file)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
 func (r *Repository) CreateFolder(
 	userID int64,
 	parentID *int64,

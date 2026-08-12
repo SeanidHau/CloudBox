@@ -39,6 +39,7 @@ type fakeFileSaver struct {
 	parentID     *int64
 	originalName string
 	fileHash     string
+	inputs       []filemodule.InstantUploadInput
 }
 
 func (s *fakeFileSaver) InstantUploadIntoFolder(
@@ -60,6 +61,24 @@ func (s *fakeFileSaver) InstantUploadIntoFolder(
 		UserID:       userID,
 		OriginalName: originalName,
 	}, nil
+}
+
+func (s *fakeFileSaver) InstantUploadManyIntoFolder(
+	userID int64,
+	parentID *int64,
+	inputs []filemodule.InstantUploadInput,
+) ([]filemodule.UserFile, error) {
+	s.userID = userID
+	s.parentID = parentID
+	s.inputs = append([]filemodule.InstantUploadInput(nil), inputs...)
+	if s.err != nil {
+		return nil, s.err
+	}
+	files := make([]filemodule.UserFile, 0, len(inputs))
+	for index, input := range inputs {
+		files = append(files, filemodule.UserFile{ID: int64(100 + index), UserID: userID, OriginalName: input.OriginalName})
+	}
+	return files, nil
 }
 
 func (p *fakeDownloadPolicy) CheckFileObjectDownload(fileObjectID int64) error {
@@ -347,6 +366,58 @@ func TestServiceSaveToUserFilesReleasesReservationOnFailure(t *testing.T) {
 	current, err := repo.FindByToken(share.Token)
 	if err != nil {
 		t.Fatalf("find share: %v", err)
+	}
+	if current.DownloadCount != 0 {
+		t.Fatalf("download count after failed save = %d, want 0", current.DownloadCount)
+	}
+}
+
+func TestServiceSaveCollectionToUserFilesCreatesEveryReference(t *testing.T) {
+	repo := newTestRepository(t)
+	saver := &fakeFileSaver{}
+	service := NewService(repo, nil, WithFileSaver(saver))
+	firstID := createTestFile(t, repo, 1, "active")
+	secondID := createTestFile(t, repo, 1, "active")
+	maxDownloads := int64(3)
+
+	collection, err := service.CreateCollection(1, []int64{firstID, secondID}, "collection-password", nil, &maxDownloads)
+	if err != nil {
+		t.Fatalf("create collection: %v", err)
+	}
+	saved, err := service.SaveCollectionToUserFilesFromIP(2, collection.Token, "collection-password", nil, "test-ip")
+	if err != nil {
+		t.Fatalf("save collection: %v", err)
+	}
+	if len(saved) != 2 || len(saver.inputs) != 2 || saver.userID != 2 {
+		t.Fatalf("saved collection = %#v, saver = %#v", saved, saver)
+	}
+	current, err := repo.FindCollectionByToken(collection.Token)
+	if err != nil {
+		t.Fatalf("find collection: %v", err)
+	}
+	if current.DownloadCount != 2 {
+		t.Fatalf("download count = %d, want 2", current.DownloadCount)
+	}
+}
+
+func TestServiceSaveCollectionReleasesAllReservationsOnFailure(t *testing.T) {
+	repo := newTestRepository(t)
+	saver := &fakeFileSaver{err: errors.New("storage quota exceeded")}
+	service := NewService(repo, nil, WithFileSaver(saver))
+	firstID := createTestFile(t, repo, 1, "active")
+	secondID := createTestFile(t, repo, 1, "active")
+	maxDownloads := int64(2)
+
+	collection, err := service.CreateCollection(1, []int64{firstID, secondID}, "", nil, &maxDownloads)
+	if err != nil {
+		t.Fatalf("create collection: %v", err)
+	}
+	if _, err := service.SaveCollectionToUserFilesFromIP(2, collection.Token, "", nil, "test-ip"); err == nil {
+		t.Fatal("save collection error = nil, want saver error")
+	}
+	current, err := repo.FindCollectionByToken(collection.Token)
+	if err != nil {
+		t.Fatalf("find collection: %v", err)
 	}
 	if current.DownloadCount != 0 {
 		t.Fatalf("download count after failed save = %d, want 0", current.DownloadCount)

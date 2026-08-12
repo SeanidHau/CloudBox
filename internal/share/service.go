@@ -47,6 +47,17 @@ type FileSaver interface {
 	) (*filemodule.UserFile, error)
 }
 
+// CollectionFileSaver is implemented by file.Service for atomic "save all"
+// collection operations. It remains separate from FileSaver so existing
+// single-file save implementations stay compatible.
+type CollectionFileSaver interface {
+	InstantUploadManyIntoFolder(
+		userID int64,
+		parentID *int64,
+		inputs []filemodule.InstantUploadInput,
+	) ([]filemodule.UserFile, error)
+}
+
 type ServiceOption func(*Service)
 
 func WithDownloadPolicy(policy DownloadPolicy) ServiceOption {
@@ -269,6 +280,67 @@ func (s *Service) OpenCollectionFileForDownloadFromIP(token string, fileID int64
 		return nil, nil, err
 	}
 	return file, reader, nil
+}
+
+// SaveCollectionToUserFilesFromIP adds every file in a collection to the
+// recipient workspace. The file service creates the records in one database
+// transaction; download reservations are compensated if that transaction
+// cannot finish.
+func (s *Service) SaveCollectionToUserFilesFromIP(userID int64, token string, password string, parentID *int64, ipHash string) ([]filemodule.UserFile, error) {
+	saver, ok := s.fileSaver.(CollectionFileSaver)
+	if !ok {
+		return nil, ErrShareSaveUnavailable
+	}
+	if _, err := s.findAccessibleCollection(token, password, ipHash); err != nil {
+		_ = s.audit(token, ipHash, AccessSave, accessResult(err))
+		return nil, err
+	}
+	files, err := s.repo.ListCollectionSharedFiles(token)
+	if err != nil || len(files) == 0 {
+		_ = s.audit(token, ipHash, AccessSave, AccessDenied)
+		if err != nil {
+			return nil, err
+		}
+		return nil, ErrShareNotFound
+	}
+	for _, file := range files {
+		if s.downloadPolicy != nil {
+			if err := s.downloadPolicy.CheckFileObjectDownload(file.ObjectID); err != nil {
+				_ = s.audit(token, ipHash, AccessSave, AccessDenied)
+				return nil, fmt.Errorf("%w: %v", ErrSharedFileUnavailable, err)
+			}
+		}
+	}
+	if !s.accessControl.AllowDownload(token, ipHash) {
+		_ = s.audit(token, ipHash, AccessSave, AccessRateLimited)
+		return nil, ErrShareDownloadRateLimit
+	}
+	reserved, err := s.repo.ReserveCollectionDownloads(token, len(files))
+	if err != nil {
+		_ = s.audit(token, ipHash, AccessSave, AccessDenied)
+		return nil, err
+	}
+	if !reserved {
+		_ = s.audit(token, ipHash, AccessSave, AccessDenied)
+		return nil, ErrDownloadLimitReached
+	}
+	inputs := make([]filemodule.InstantUploadInput, 0, len(files))
+	for _, file := range files {
+		inputs = append(inputs, filemodule.InstantUploadInput{OriginalName: file.OriginalName, FileHash: file.FileHash})
+	}
+	saved, err := saver.InstantUploadManyIntoFolder(userID, parentID, inputs)
+	if err != nil {
+		if releaseErr := s.repo.ReleaseCollectionDownloadReservations(token, len(files)); releaseErr != nil {
+			_ = s.audit(token, ipHash, AccessSave, AccessDenied)
+			return nil, fmt.Errorf("save shared collection: %w (release reservation: %v)", err, releaseErr)
+		}
+		_ = s.audit(token, ipHash, AccessSave, AccessDenied)
+		return nil, err
+	}
+	if err := s.audit(token, ipHash, AccessSave, AccessAllowed); err != nil {
+		return nil, err
+	}
+	return saved, nil
 }
 
 func (s *Service) findAccessibleCollection(token string, password string, ipHash string) (*CollectionShare, error) {

@@ -690,6 +690,59 @@ func (s *Service) InstantUploadIntoFolder(
 	return s.withAvailability(file)
 }
 
+// InstantUploadManyIntoFolder saves several references to existing objects in
+// a single transaction. It is used for "save all" on a shared collection.
+func (s *Service) InstantUploadManyIntoFolder(
+	userID int64,
+	parentID *int64,
+	inputs []InstantUploadInput,
+) ([]UserFile, error) {
+	if len(inputs) == 0 {
+		return nil, ErrFileHashRequired
+	}
+
+	objects := make([]*FileObject, 0, len(inputs))
+	originalNames := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		originalName := strings.TrimSpace(input.OriginalName)
+		fileHash := strings.TrimSpace(input.FileHash)
+		if originalName == "" {
+			return nil, ErrOriginalNameRequired
+		}
+		if fileHash == "" {
+			return nil, ErrFileHashRequired
+		}
+		object, err := s.repo.FindFileObjectByHash(fileHash)
+		if err != nil {
+			return nil, err
+		}
+		objects = append(objects, object)
+		originalNames = append(originalNames, originalName)
+	}
+
+	quotaBytes, err := s.storageQuotaForUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	files, err := s.repo.CreateManyWithObjectsInFolder(userID, parentID, objects, originalNames, quotaBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	s.invalidateStorageUsageCache(userID)
+	for index := range files {
+		if s.virusScanner == nil {
+			s.enqueueThumbnailIfSupported(userID, files[index].ID, objects[index])
+		} else {
+			s.enqueueFileScanIfEnabled(userID, files[index].ID, objects[index])
+		}
+		if _, err = s.withAvailability(&files[index]); err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
+}
+
 func (s *Service) CreateFolder(
 	userID int64,
 	parentID *int64,

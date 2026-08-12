@@ -72,6 +72,23 @@ func (r *Repository) ListCollectionFiles(token string) ([]PublicFile, error) {
 	return files, nil
 }
 
+func (r *Repository) ListCollectionSharedFiles(token string) ([]SharedFile, error) {
+	rows, err := r.db.Query(`SELECT fo.id, uf.id, uf.original_name, uf.storage_path, uf.size, uf.content_type, fo.file_hash FROM share_collection_items sci JOIN user_files uf ON uf.id = sci.user_file_id JOIN file_objects fo ON fo.id = uf.object_id WHERE sci.collection_token = $1 AND uf.status = 'active' ORDER BY uf.created_at DESC`, token)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	files := make([]SharedFile, 0)
+	for rows.Next() {
+		var file SharedFile
+		if err := rows.Scan(&file.ObjectID, &file.ID, &file.OriginalName, &file.StoragePath, &file.Size, &file.ContentType, &file.FileHash); err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	return files, rows.Err()
+}
+
 func (r *Repository) FindCollectionFile(token string, fileID int64) (*SharedFile, error) {
 	var file SharedFile
 	err := r.db.QueryRow(`SELECT fo.id, uf.id, uf.original_name, uf.storage_path, uf.size, uf.content_type, fo.file_hash FROM share_collection_items sci JOIN user_files uf ON uf.id = sci.user_file_id JOIN file_objects fo ON fo.id = uf.object_id WHERE sci.collection_token = $1 AND sci.user_file_id = $2 AND uf.status = 'active'`, token, fileID).Scan(&file.ObjectID, &file.ID, &file.OriginalName, &file.StoragePath, &file.Size, &file.ContentType, &file.FileHash)
@@ -85,12 +102,27 @@ func (r *Repository) FindCollectionFile(token string, fileID int64) (*SharedFile
 }
 
 func (r *Repository) ReserveCollectionDownload(token string) (bool, error) {
-	result, err := r.db.Exec(`UPDATE share_collections SET download_count = download_count + 1 WHERE token = $1 AND expires_at > CURRENT_TIMESTAMP AND (max_downloads IS NULL OR download_count < max_downloads)`, token)
+	return r.ReserveCollectionDownloads(token, 1)
+}
+
+func (r *Repository) ReserveCollectionDownloads(token string, count int) (bool, error) {
+	if count <= 0 {
+		return false, nil
+	}
+	result, err := r.db.Exec(`UPDATE share_collections SET download_count = download_count + $2 WHERE token = $1 AND expires_at > CURRENT_TIMESTAMP AND (max_downloads IS NULL OR download_count + $2 <= max_downloads)`, token, count)
 	if err != nil {
 		return false, err
 	}
 	affected, err := result.RowsAffected()
 	return affected == 1, err
+}
+
+func (r *Repository) ReleaseCollectionDownloadReservations(token string, count int) error {
+	if count <= 0 {
+		return nil
+	}
+	_, err := r.db.Exec(`UPDATE share_collections SET download_count = CASE WHEN download_count >= $2 THEN download_count - $2 ELSE 0 END WHERE token = $1`, token, count)
+	return err
 }
 
 func (r *Repository) ListCollectionsByUser(userID int64) ([]CollectionShare, error) {

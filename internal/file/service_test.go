@@ -1065,6 +1065,58 @@ func TestServiceInstantUploadIntoFolder(t *testing.T) {
 	}
 }
 
+func TestServiceInstantUploadManyIntoFolderIsAtomicAtQuotaLimit(t *testing.T) {
+	storage := &fakeStorage{}
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		storage,
+		20,
+		WithStorageQuotaProvider(fakeStorageQuotaProvider{quotas: map[int64]int64{1: 20, 2: 10}}),
+	)
+	first, err := service.Upload(1, "first.txt", "text/plain", strings.NewReader("12345"))
+	if err != nil {
+		t.Fatalf("upload first source: %v", err)
+	}
+	second, err := service.Upload(1, "second.txt", "text/plain", strings.NewReader("123456"))
+	if err != nil {
+		t.Fatalf("upload second source: %v", err)
+	}
+	firstObject, err := service.repo.FindObjectForActiveFile(first.ID)
+	if err != nil {
+		t.Fatalf("find first object: %v", err)
+	}
+	secondObject, err := service.repo.FindObjectForActiveFile(second.ID)
+	if err != nil {
+		t.Fatalf("find second object: %v", err)
+	}
+
+	_, err = service.InstantUploadManyIntoFolder(2, nil, []InstantUploadInput{
+		{OriginalName: "copy-first.txt", FileHash: firstObject.FileHash},
+		{OriginalName: "copy-second.txt", FileHash: secondObject.FileHash},
+	})
+	if !errors.Is(err, ErrStorageQuotaExceeded) {
+		t.Fatalf("batch save error = %v, want %v", err, ErrStorageQuotaExceeded)
+	}
+	files, err := service.ListActive(2)
+	if err != nil {
+		t.Fatalf("list target files: %v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("target file count = %d, want 0 after atomic rollback", len(files))
+	}
+	firstObject, err = service.repo.FindFileObjectByHash(firstObject.FileHash)
+	if err != nil {
+		t.Fatalf("reload first object: %v", err)
+	}
+	secondObject, err = service.repo.FindFileObjectByHash(secondObject.FileHash)
+	if err != nil {
+		t.Fatalf("reload second object: %v", err)
+	}
+	if firstObject.ReferenceCount != 1 || secondObject.ReferenceCount != 1 {
+		t.Fatalf("object references after rollback = %d, %d; want 1, 1", firstObject.ReferenceCount, secondObject.ReferenceCount)
+	}
+}
+
 func TestServiceCreateAndListFolders(t *testing.T) {
 	service := newTestServiceWithStorage(t, &fakeStorage{})
 

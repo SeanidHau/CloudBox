@@ -139,6 +139,40 @@ func (h *Handler) DownloadCollectionFile(c *gin.Context) {
 	http.ServeContent(c.Writer, c.Request, file.OriginalName, time.Time{}, reader)
 }
 
+func (h *Handler) SaveCollection(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+	var req saveShareRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body"})
+		return
+	}
+	files, err := h.service.SaveCollectionToUserFilesFromIP(userID, c.Param("token"), req.Password, req.ParentID, shareIPHash(c))
+	switch {
+	case errors.Is(err, ErrShareNotFound), errors.Is(err, ErrFileNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "share not found"})
+	case errors.Is(err, ErrSharePasswordRequired), errors.Is(err, ErrSharePasswordInvalid):
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid share password"})
+	case errors.Is(err, ErrSharePasswordLocked), errors.Is(err, ErrShareDownloadRateLimit):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrShareExpired), errors.Is(err, ErrDownloadLimitReached):
+		c.JSON(http.StatusGone, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrSharedFileUnavailable):
+		c.JSON(http.StatusLocked, gin.H{"error": "shared file is not available"})
+	case errors.Is(err, filemodule.ErrFolderNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	case errors.Is(err, filemodule.ErrStorageQuotaExceeded):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save shared collection"})
+	default:
+		c.JSON(http.StatusCreated, gin.H{"files": files})
+	}
+}
+
 func (h *Handler) Download(c *gin.Context) {
 	file, reader, err := h.service.OpenForDownloadFromIP(
 		c.Param("token"),
