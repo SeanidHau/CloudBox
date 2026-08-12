@@ -3,6 +3,7 @@ import {
   Archive,
   ArrowLeft,
   Check,
+  ChevronLeft,
   ChevronRight,
   CircleHelp,
   Cloud,
@@ -118,9 +119,9 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
         <div className="brand-mark brand-mark-large"><Cloud size={28} strokeWidth={2.4} /></div>
         <p className="eyebrow">CLOUDBOX WORKSPACE</p>
         <h1>管理每一份<br />重要文件。</h1>
-        <p className="auth-copy">上传、整理、共享与安全扫描都在一个安静、清晰的工作台中完成。</p>
+        <p className="auth-copy">上传、整理和共享都在一个安静、清晰的工作台中完成。</p>
         <div className="auth-features">
-          <span><ShieldCheck size={16} /> 异步安全扫描</span>
+          <span><ShieldCheck size={16} /> 文件处理状态可见</span>
           <span><HardDrive size={16} /> 容量配额可见</span>
           <span><Share2 size={16} /> 可控外链分享</span>
         </div>
@@ -264,10 +265,12 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   const [toast, setToast] = useState<Toast>(null);
   const [dialog, setDialog] = useState<"upload" | "folder" | "rename" | "move" | "share" | "save-share" | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [imageViewer, setImageViewer] = useState<UserFile | null>(null);
   const [dragging, setDragging] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
+  const processingFilesRef = useRef(new Set<number>());
 
   const view = location.pathname === "/trash" ? "trash" : location.pathname === "/shares" ? "shares" : location.pathname === "/settings" ? "settings" : "files";
   const folderPath = readFolderPath(searchParams.get("path"), toID(searchParams.get("folder")));
@@ -331,6 +334,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     ...filteredFolders.map((value) => ({ type: "folder" as const, value })),
     ...filteredFiles.map((value) => ({ type: "file" as const, value }))
   ], [filteredFiles, filteredFolders]);
+  const previewableImages = useMemo(() => files.filter(isInlinePreviewable), [files]);
   const isLoading = (view === "files" && (filesQuery.isLoading || foldersQuery.isLoading)) || (view === "trash" && trashQuery.isLoading) || (view === "shares" && sharesQuery.isLoading);
   const loadError = view === "files" ? filesQuery.error ?? foldersQuery.error : view === "trash" ? trashQuery.error : sharesQuery.error;
 
@@ -345,6 +349,22 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   function show(message: string, tone: NonNullable<Toast>["tone"] = "success") {
     setToast({ message, tone });
   }
+
+  useEffect(() => {
+    const tracked = processingFilesRef.current;
+    const readyNow = files.filter((file) => file.availability === "ready" && tracked.has(file.id));
+    readyNow.forEach((file) => {
+      tracked.delete(file.id);
+      show(`“${file.original_name}”已处理完成，现在可以访问。`, "info");
+    });
+    files.filter((file) => file.availability === "processing").forEach((file) => tracked.add(file.id));
+
+    if (!files.some((file) => file.availability === "processing")) return undefined;
+    const timer = window.setInterval(() => {
+      void queryClient.invalidateQueries({ queryKey: ["files"] });
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [files, queryClient]);
 
   async function handleUpload(fileList: FileList | File[]) {
     const queue = Array.from(fileList);
@@ -435,7 +455,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
       await api.download(file.id);
     } catch (err) {
       const apiError = err instanceof ApiError ? err : null;
-      const hint = apiError?.status === 423 ? "文件正在等待安全扫描完成，暂时不可下载。" : apiError?.status === 403 ? "该文件未通过安全扫描，无法下载。" : messageOf(err);
+      const hint = apiError?.status === 423 ? "文件正在处理中，暂时不可下载。" : apiError?.status === 403 ? "该文件当前不可访问。" : messageOf(err);
       show(hint, "error");
     }
   }
@@ -539,9 +559,9 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
               try { await api.revokeShare(share.token); invalidateWorkspace(); show("分享链接已撤销"); } catch (err) { show(messageOf(err), "error"); }
             }} />
           ) : (
-            <div className={`file-layout ${selected ? "details-open" : ""}`}>
+            <div className={`file-layout ${view} ${selected ? "details-open" : ""}`}>
               <section className="file-surface" onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); void handleUpload(event.dataTransfer.files); }}>
-                {dragging && <div className="drop-overlay"><Upload size={24} /><strong>释放以上传到当前目录</strong><span>文件会先完成后端安全扫描</span></div>}
+                {dragging && <div className="drop-overlay"><Upload size={24} /><strong>释放以上传到当前目录</strong><span>上传后会完成处理，完成后即可访问</span></div>}
                 <div className="file-table-wrap">
                   <div className="section-label">{view === "trash" ? "已删除文件" : "目录内容"} <span>{view === "trash" ? filteredFiles.length : entries.length}</span></div>
                   <div className="file-table">
@@ -551,16 +571,21 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
                     {!isLoading && !loadError && (view === "trash" ? filteredFiles.length : entries.length) === 0 && <EmptyFiles trash={view === "trash"} searching={Boolean(search)} />}
                     {view === "trash" ? filteredFiles.map((file) => <FileRow key={file.id} file={file} selected={selected?.type === "file" && selected.value.id === file.id} trash onSelect={() => setSelected({ type: "file", value: file })} onDownload={() => void downloadFile(file)} onDelete={() => void removeFile(file, true)} onRestore={() => void restoreFile(file)} />) : entries.map((entry) => <DirectoryEntryRow key={`${entry.type}-${entry.value.id}`} entry={entry} selected={selected?.type === entry.type && selected.value.id === entry.value.id} onSelect={() => setSelected(entry)} onOpenFolder={() => entry.type === "folder" && openFolder(entry.value)} onDownload={() => entry.type === "file" && void downloadFile(entry.value)} onDelete={() => entry.type === "file" && void removeFile(entry.value)} />)}
                   </div>
+                  {view === "files" && <MediaGrid entries={entries} onOpenFolder={openFolder} onSelect={(entry) => setSelected(entry)} onPreview={(file) => setImageViewer(file)} />}
                 </div>
               </section>
-              {selected && <DetailPanel selected={selected} trash={view === "trash"} onClose={() => setSelected(null)} onDownload={() => selected.type === "file" && void downloadFile(selected.value)} onDelete={() => selected.type === "file" ? void removeFile(selected.value, view === "trash") : void removeFolder(selected.value)} onRestore={() => selected.type === "file" && void restoreFile(selected.value)} onRename={() => setDialog("rename")} onMove={() => setDialog("move")} onShare={() => setDialog("share")} onVerify={async () => {
-                if (selected.type !== "file") return;
-                try { await api.enqueueVerification(selected.value.id); show("已加入文件完整性校验队列", "info"); } catch (err) { show(messageOf(err), "error"); }
-              }} />}
+              {selected && <DetailPanel selected={selected} trash={view === "trash"} onClose={() => setSelected(null)} onDownload={() => selected.type === "file" && void downloadFile(selected.value)} onDelete={() => selected.type === "file" ? void removeFile(selected.value, view === "trash") : void removeFolder(selected.value)} onRestore={() => selected.type === "file" && void restoreFile(selected.value)} onRename={() => setDialog("rename")} onMove={() => setDialog("move")} onShare={() => setDialog("share")} onPreview={() => selected.type === "file" && isInlinePreviewable(selected.value) && setImageViewer(selected.value)} />}
             </div>
           )}
         </section>
       </main>
+
+      <nav className="mobile-nav" aria-label="移动端导航">
+        <NavLink to="/files" className={({ isActive }) => navClass(isActive && view === "files")}><LayoutGrid size={19} /><span>文件</span></NavLink>
+        <NavLink to="/shares" className={({ isActive }) => navClass(isActive)}><Share2 size={19} /><span>分享</span></NavLink>
+        <NavLink to="/trash" className={({ isActive }) => navClass(isActive)}><Trash2 size={19} /><span>回收站</span></NavLink>
+        <NavLink to="/settings" className={({ isActive }) => navClass(isActive)}><Settings size={19} /><span>我的</span></NavLink>
+      </nav>
 
       {uploads.length > 0 && <UploadQueue items={uploads} />}
       {toast && <div className={`toast toast-${toast.tone}`}>{toast.tone === "success" ? <ShieldCheck size={17} /> : <CircleHelp size={17} />}<span>{toast.message}</span><button type="button" aria-label="关闭提示" onClick={() => setToast(null)}><X size={15} /></button></div>}
@@ -598,16 +623,18 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
         } catch (err) { show(messageOf(err), "error"); }
       }} />}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
+      {imageViewer && <ImageViewer file={imageViewer} images={previewableImages} onClose={() => setImageViewer(null)} onSelect={setImageViewer} onDownload={(file) => void downloadFile(file)} onShare={(file) => { setSelected({ type: "file", value: file }); setImageViewer(null); setDialog("share"); }} onDelete={(file) => { setImageViewer(null); void removeFile(file); }} />}
     </div>
   );
 }
 
 function FileRow({ file, selected, trash, onSelect, onDownload, onDelete, onRestore }: { file: UserFile; selected: boolean; trash: boolean; onSelect: () => void; onDownload: () => void; onDelete: () => void; onRestore: () => void }) {
-  return <div className={`file-row ${selected ? "selected" : ""}`} onClick={onSelect} onDoubleClick={onDownload}>
+  const accessible = file.availability === "ready";
+  return <div className={`file-row ${selected ? "selected" : ""}`} onClick={onSelect} onDoubleClick={accessible ? onDownload : undefined}>
     <span className="file-name"><FileKindIcon file={file} /><strong>{file.original_name}</strong></span>
     <span>{formatBytes(file.size)}</span><span className="file-type">{shortType(file.content_type)}</span><span>{formatDate(file.created_at)}</span>
     <span className="row-actions" onClick={(event) => event.stopPropagation()}>
-      {trash ? <><IconAction label="恢复" onClick={onRestore}><Archive size={16} /></IconAction><IconAction label="彻底删除" tone="danger" onClick={onDelete}><Trash2 size={16} /></IconAction></> : <><IconAction label="下载" onClick={onDownload}><Download size={16} /></IconAction><IconAction label="移入回收站" tone="danger" onClick={onDelete}><Trash2 size={16} /></IconAction></>}
+      {trash ? <><IconAction label="恢复" onClick={onRestore}><Archive size={16} /></IconAction><IconAction label="彻底删除" tone="danger" onClick={onDelete}><Trash2 size={16} /></IconAction></> : <>{accessible && <IconAction label="下载" onClick={onDownload}><Download size={16} /></IconAction>}<IconAction label="移入回收站" tone="danger" onClick={onDelete}><Trash2 size={16} /></IconAction></>}
     </span>
   </div>;
 }
@@ -617,19 +644,21 @@ function DirectoryEntryRow({ entry, selected, onSelect, onOpenFolder, onDownload
   const name = isFolder ? entry.value.name : entry.value.original_name;
   const createdAt = isFolder ? entry.value.created_at : entry.value.created_at;
 
-  return <div className={`file-row ${selected ? "selected" : ""} ${isFolder ? "folder-row" : ""}`} onClick={onSelect} onDoubleClick={isFolder ? onOpenFolder : onDownload}>
+  const accessible = isFolder || entry.value.availability === "ready";
+  return <div className={`file-row ${selected ? "selected" : ""} ${isFolder ? "folder-row" : ""}`} onClick={onSelect} onDoubleClick={isFolder ? onOpenFolder : accessible ? onDownload : undefined}>
     <span className="file-name">{isFolder ? <FolderOpen size={20} className="kind-folder" fill="currentColor" /> : <FileKindIcon file={entry.value} />}<strong>{name}</strong></span>
     <span>{formatBytes(entry.value.size)}</span>
     <span className="file-type">{isFolder ? "文件夹" : shortType(entry.value.content_type)}</span>
     <span>{formatDate(createdAt)}</span>
     <span className="row-actions" onClick={(event) => event.stopPropagation()}>
-      {isFolder ? <IconAction label="打开文件夹" onClick={onOpenFolder}><ChevronRight size={17} /></IconAction> : <><IconAction label="下载" onClick={onDownload}><Download size={16} /></IconAction><IconAction label="移入回收站" tone="danger" onClick={onDelete}><Trash2 size={16} /></IconAction></>}
+      {isFolder ? <IconAction label="打开文件夹" onClick={onOpenFolder}><ChevronRight size={17} /></IconAction> : <>{accessible && <IconAction label="下载" onClick={onDownload}><Download size={16} /></IconAction>}<IconAction label="移入回收站" tone="danger" onClick={onDelete}><Trash2 size={16} /></IconAction></>}
     </span>
   </div>;
 }
 
-function DetailPanel({ selected, trash, onClose, onDownload, onDelete, onRestore, onRename, onMove, onShare, onVerify }: { selected: Exclude<SelectedItem, null>; trash: boolean; onClose: () => void; onDownload: () => void; onDelete: () => void; onRestore: () => void; onRename: () => void; onMove: () => void; onShare: () => void; onVerify: () => void }) {
+function DetailPanel({ selected, trash, onClose, onDownload, onDelete, onRestore, onRename, onMove, onShare, onPreview }: { selected: Exclude<SelectedItem, null>; trash: boolean; onClose: () => void; onDownload: () => void; onDelete: () => void; onRestore: () => void; onRename: () => void; onMove: () => void; onShare: () => void; onPreview: () => void }) {
   const file = selected.type === "file" ? selected.value : null;
+  const accessible = file?.availability === "ready";
   const [preview, setPreview] = useState<string | null>(null);
   useEffect(() => {
     if (!file?.content_type.startsWith("image/")) { setPreview(null); return undefined; }
@@ -641,22 +670,83 @@ function DetailPanel({ selected, trash, onClose, onDownload, onDelete, onRestore
   const name = selected.type === "file" ? selected.value.original_name : selected.value.name;
   return <aside className="detail-panel">
     <div className="detail-top"><span>详细信息</span><button className="icon-button" type="button" onClick={onClose} aria-label="关闭详情" title="关闭详情"><X size={18} /></button></div>
-    <div className="preview-box">{file && preview ? <img src={preview} alt={`${name} 缩略图`} /> : file ? <FileKindIcon file={file} size={54} /> : <Folder size={56} fill="currentColor" />}{file?.content_type.startsWith("image/") && !preview && <span className="preview-unavailable"><ImageOff size={16} />暂无预览</span>}</div>
+    <div className="preview-box">{file && preview ? <button type="button" className="preview-trigger" onClick={accessible ? onPreview : undefined} disabled={!accessible} title="查看图片"><img src={preview} alt={`${name} 缩略图`} /></button> : file ? <FileKindIcon file={file} size={54} /> : <Folder size={56} fill="currentColor" />}{file?.content_type.startsWith("image/") && !preview && <span className="preview-unavailable"><ImageOff size={16} />暂无预览</span>}</div>
     <div className="detail-name"><strong>{name}</strong><span>{file ? shortType(file.content_type) : "文件夹"}</span></div>
     <div className="detail-actions">
-      {file && !trash && <><button className="primary-button compact" type="button" onClick={onDownload}><Download size={16} />下载</button><button className="secondary-button compact" type="button" onClick={onShare}><Link size={16} />分享</button></>}
+      {file && !trash && accessible && <><button className="primary-button compact" type="button" onClick={onDownload}><Download size={16} />下载</button><button className="secondary-button compact" type="button" onClick={onShare}><Link size={16} />分享</button></>}
       {file && trash && <button className="primary-button compact" type="button" onClick={onRestore}><Archive size={16} />恢复文件</button>}
-      {!trash && <><button className="icon-action-wide" type="button" onClick={onRename}><Pencil size={16} />重命名</button><button className="icon-action-wide" type="button" onClick={onMove}><MoveRight size={16} />移动到</button>{file && <button className="icon-action-wide" type="button" onClick={onVerify}><ShieldCheck size={16} />发起完整性校验</button>}</>}
+      {!trash && <><button className="icon-action-wide" type="button" onClick={onRename}><Pencil size={16} />重命名</button><button className="icon-action-wide" type="button" onClick={onMove}><MoveRight size={16} />移动到</button></>}
       <button className="icon-action-wide danger" type="button" onClick={onDelete}><Trash2 size={16} />{trash ? "彻底删除" : "移入回收站"}</button>
     </div>
     <dl className="metadata-list">
-      <div><dt>类型</dt><dd>{file ? file.content_type || "未知" : "文件夹"}</dd></div>
+      <div><dt>类型</dt><dd>{file ? shortType(file.content_type) : "文件夹"}</dd></div>
       <div><dt>大小</dt><dd>{formatBytes(file ? file.size : selected.value.size)}</dd></div>
       <div><dt>创建时间</dt><dd>{formatDate(selected.value.created_at)}</dd></div>
-      {file && <div><dt>状态</dt><dd><span className={file.status === "active" ? "status-active" : "status-deleted"}>{file.status === "active" ? "可用" : "已删除"}</span></dd></div>}
+      {file && <div><dt>状态</dt><dd><span className={`availability-${file.availability}`}>{availabilityLabel(file.availability)}</span></dd></div>}
     </dl>
-    {file && <p className="scan-note"><ShieldCheck size={15} />下载与缩略图会受到后端安全扫描结果控制。</p>}
+    {file && file.availability === "processing" && <p className="scan-note"><LoaderCircle size={15} className="spin" />文件正在处理中，完成后可下载和分享。</p>}
+    {file && file.availability === "unavailable" && <p className="scan-note unavailable-note"><ImageOff size={15} />该文件当前不可访问。</p>}
+    {file?.content_type === "image/heic" && <p className="scan-note"><ImageOff size={15} />该图片格式暂不支持浏览器预览，可下载后查看。</p>}
+    {file?.content_type.startsWith("video/") && <p className="scan-note"><FileVideo size={15} />视频暂不支持在线播放，可下载后观看。</p>}
   </aside>;
+}
+
+function MediaGrid({ entries, onOpenFolder, onSelect, onPreview }: { entries: DirectoryEntry[]; onOpenFolder: (folder: FolderType) => void; onSelect: (entry: DirectoryEntry) => void; onPreview: (file: UserFile) => void }) {
+  return <div className="mobile-media-grid">{entries.map((entry) => {
+    const folder = entry.type === "folder";
+    const file = folder ? null : entry.value;
+    return <MediaTile key={`mobile-${entry.type}-${entry.value.id}`} entry={entry} onOpenFolder={onOpenFolder} onSelect={onSelect} onPreview={onPreview} />;
+  })}</div>;
+}
+
+function MediaTile({ entry, onOpenFolder, onSelect, onPreview }: { entry: DirectoryEntry; onOpenFolder: (folder: FolderType) => void; onSelect: (entry: DirectoryEntry) => void; onPreview: (file: UserFile) => void }) {
+  const folder = entry.type === "folder";
+  const file = folder ? null : entry.value;
+  const canPreview = Boolean(file && isInlinePreviewable(file));
+  const [thumbnail, setThumbnail] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!file || !isThumbnailSupported(file)) { setThumbnail(null); return undefined; }
+    let objectURL: string | null = null;
+    void api.thumbnail(file.id).then((blob) => { objectURL = URL.createObjectURL(blob); setThumbnail(objectURL); }).catch(() => setThumbnail(null));
+    return () => { if (objectURL) URL.revokeObjectURL(objectURL); };
+  }, [file?.id, file?.content_type, file?.availability]);
+
+  return <button type="button" className="mobile-media-tile" onClick={() => folder ? onOpenFolder(entry.value) : canPreview ? onPreview(file!) : onSelect(entry)}>
+    <span className="mobile-media-icon">{thumbnail ? <img src={thumbnail} alt="" /> : folder ? <FolderOpen size={31} fill="currentColor" /> : <FileKindIcon file={file!} size={31} />}</span>
+    <strong>{folder ? entry.value.name : file!.original_name}</strong>
+    <small>{folder ? `${formatBytes(entry.value.size)} · 文件夹` : `${formatBytes(file!.size)} · ${availabilityLabel(file!.availability)}`}</small>
+  </button>;
+}
+
+function ImageViewer({ file, images, onClose, onSelect, onDownload, onShare, onDelete }: { file: UserFile; images: UserFile[]; onClose: () => void; onSelect: (file: UserFile) => void; onDownload: (file: UserFile) => void; onShare: (file: UserFile) => void; onDelete: (file: UserFile) => void }) {
+  const [source, setSource] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const currentIndex = images.findIndex((item) => item.id === file.id);
+  const previous = currentIndex > 0 ? images[currentIndex - 1] : null;
+  const next = currentIndex >= 0 && currentIndex < images.length - 1 ? images[currentIndex + 1] : null;
+  useEffect(() => {
+    let objectURL: string | null = null;
+    setSource(null);
+    setError("");
+    void api.preview(file.id).then((blob) => { objectURL = URL.createObjectURL(blob); setSource(objectURL); }).catch((err) => setError(messageOf(err)));
+    return () => { if (objectURL) URL.revokeObjectURL(objectURL); };
+  }, [file.id]);
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowLeft" && previous) onSelect(previous);
+      if (event.key === "ArrowRight" && next) onSelect(next);
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [next, onClose, onSelect, previous]);
+  return <div className="image-viewer" role="dialog" aria-modal="true" aria-label={`${file.original_name} 图片预览`} onClick={onClose}>
+    <div className="image-viewer-toolbar" onClick={(event) => event.stopPropagation()}><strong>{file.original_name}</strong><div><IconAction label="下载" onClick={() => onDownload(file)}><Download size={18} /></IconAction><IconAction label="分享" onClick={() => onShare(file)}><Link size={18} /></IconAction><IconAction label="移入回收站" tone="danger" onClick={() => onDelete(file)}><Trash2 size={18} /></IconAction><button className="icon-button" type="button" onClick={onClose} aria-label="关闭图片预览"><X size={20} /></button></div></div>
+    {previous && <button className="image-viewer-nav previous" type="button" title="上一张" aria-label="上一张" onClick={(event) => { event.stopPropagation(); onSelect(previous); }}><ChevronLeft size={24} /></button>}
+    {next && <button className="image-viewer-nav next" type="button" title="下一张" aria-label="下一张" onClick={(event) => { event.stopPropagation(); onSelect(next); }}><ChevronRight size={24} /></button>}
+    {source ? <img src={source} alt={file.original_name} onClick={(event) => event.stopPropagation()} /> : <p>{error || "正在加载图片…"}</p>}
+  </div>;
 }
 
 function SharesView({ shares, loading, error, onCopy, onRevoke }: { shares: Share[]; loading: boolean; error: unknown; onCopy: () => void; onRevoke: (share: Share) => void }) {
@@ -676,7 +766,7 @@ function SharesView({ shares, loading, error, onCopy, onRevoke }: { shares: Shar
 
   return <section className="share-surface"><div className="share-intro"><div><p className="eyebrow">EXTERNAL ACCESS</p><h2>分享链接</h2><p>从文件详情创建链接。默认有效期为 7 天，可设置密码和下载次数。</p></div><Share2 size={28} /></div><div className="share-table"><div className="share-row share-row-head"><span>分享文件</span><span>下载次数</span><span>过期时间</span><span /></div>{loading && <LoadingRows />}{Boolean(error) && <div className="empty-state error-state"><p>无法加载分享链接</p><span>{messageOf(error)}</span></div>}{!loading && !error && shares.length === 0 && <div className="empty-state"><Share2 size={28} /><p>还没有有效的分享链接</p><span>在文件详情中点击“分享”即可创建。</span></div>}{shares.map((share) => {
     const copied = copiedToken === share.token;
-    return <div className="share-row" key={share.token}><span className="share-file-summary"><FileKindIcon file={{ id: 0, user_id: 0, parent_id: null, original_name: share.original_name, storage_path: "", size: share.size, content_type: share.content_type, status: "active", created_at: share.created_at }} /><span><strong>{share.original_name}</strong><small>{formatBytes(share.size)} · {shortType(share.content_type)}</small></span><span className="share-token"><button type="button" className={copied ? "share-copy copied" : "share-copy"} title={copied ? "链接已复制" : "复制公开链接"} aria-label={copied ? "链接已复制" : "复制公开链接"} onClick={() => void copyShareLink(share.token)}>{copied ? <Check size={15} /> : <Link size={15} />}</button>{copied && <span className="copy-status" role="status">已复制</span>}</span></span><span>{share.download_count}{share.max_downloads ? ` / ${share.max_downloads}` : ""}</span><span>{share.expires_at ? formatDate(share.expires_at) : "7 天后过期"}</span><span><IconAction label="撤销分享" tone="danger" onClick={() => onRevoke(share)}><Trash2 size={16} /></IconAction></span></div>;
+    return <div className="share-row" key={share.token}><span className="share-file-summary"><FileKindIcon file={{ id: 0, user_id: 0, parent_id: null, original_name: share.original_name, storage_path: "", size: share.size, content_type: share.content_type, status: "active", availability: "ready", created_at: share.created_at }} /><span><strong>{share.original_name}</strong><small>{formatBytes(share.size)} · {shortType(share.content_type)}</small></span><span className="share-token"><button type="button" className={copied ? "share-copy copied" : "share-copy"} title={copied ? "链接已复制" : "复制公开链接"} aria-label={copied ? "链接已复制" : "复制公开链接"} onClick={() => void copyShareLink(share.token)}>{copied ? <Check size={15} /> : <Link size={15} />}</button>{copied && <span className="copy-status" role="status">已复制</span>}</span></span><span>{share.download_count}{share.max_downloads ? ` / ${share.max_downloads}` : ""}</span><span>{share.expires_at ? formatDate(share.expires_at) : "7 天后过期"}</span><span><IconAction label="撤销分享" tone="danger" onClick={() => onRevoke(share)}><Trash2 size={16} /></IconAction></span></div>;
   })}</div></section>;
 }
 
@@ -764,5 +854,14 @@ function shareTokenFromReference(value: string) {
   return /\s/.test(reference) ? "" : reference;
 }
 function shortType(value: string) { if (!value) return "未知"; if (value.startsWith("image/")) return "图片"; if (value.startsWith("video/")) return "视频"; if (value.startsWith("text/")) return "文本"; if (value.includes("pdf")) return "PDF"; return value.split("/").at(-1)?.toUpperCase() ?? value; }
+function availabilityLabel(value: UserFile["availability"]) { return value === "ready" ? "可用" : value === "processing" ? "处理中" : "不可用"; }
+
+function isInlinePreviewable(file: UserFile) {
+  return file.availability === "ready" && ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.content_type);
+}
+
+function isThumbnailSupported(file: UserFile) {
+  return file.availability === "ready" && ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.content_type);
+}
 function usagePercent(usage: StorageUsage | undefined) { if (!usage?.quota_bytes) return 0; return Math.min(Math.round((usage.used_bytes / usage.quota_bytes) * 100), 100); }
 function messageOf(error: unknown) { return error instanceof Error ? error.message : "发生未知错误"; }

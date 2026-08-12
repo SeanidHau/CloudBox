@@ -106,6 +106,12 @@ func TestGenerateThumbnailForActiveFileRejectsUnsupportedContentType(t *testing.
 	}
 }
 
+func TestSupportsThumbnailIncludesWebP(t *testing.T) {
+	if !SupportsThumbnail("image/webp") {
+		t.Fatal("WebP should be supported for thumbnail generation")
+	}
+}
+
 func TestImageUploadAndInstantUploadEnqueueThumbnailJobs(t *testing.T) {
 	storage := &fakeStorage{}
 	queue := &fakeJobEnqueuer{

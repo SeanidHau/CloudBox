@@ -16,19 +16,20 @@ import (
 )
 
 var (
-	ErrOriginalNameRequired    = errors.New("original name is required")
-	ErrContentRequired         = errors.New("file content is required")
-	ErrFileHashRequired        = errors.New("file hash is required")
-	ErrFolderNameRequired      = errors.New("folder name is required")
-	ErrFolderAlreadyExists     = errors.New("folder already exists")
-	ErrFolderMoveCycle         = errors.New("folder cannot be moved into itself or its descendant")
-	ErrFolderNotEmpty          = errors.New("folder is not empty")
-	ErrStorageQuotaExceeded    = errors.New("storage quota exceeded")
-	ErrFileIntegrityMismatch   = errors.New("file content does not match stored hash")
-	ErrJobQueueUnavailable     = errors.New("background job queue is unavailable")
-	ErrVirusScannerUnavailable = errors.New("virus scanner is unavailable")
-	ErrFileScanIncomplete      = errors.New("file is unavailable until virus scan completes")
-	ErrFileInfected            = errors.New("file is infected")
+	ErrOriginalNameRequired     = errors.New("original name is required")
+	ErrContentRequired          = errors.New("file content is required")
+	ErrFileHashRequired         = errors.New("file hash is required")
+	ErrFolderNameRequired       = errors.New("folder name is required")
+	ErrFolderAlreadyExists      = errors.New("folder already exists")
+	ErrFolderMoveCycle          = errors.New("folder cannot be moved into itself or its descendant")
+	ErrFolderNotEmpty           = errors.New("folder is not empty")
+	ErrStorageQuotaExceeded     = errors.New("storage quota exceeded")
+	ErrFileIntegrityMismatch    = errors.New("file content does not match stored hash")
+	ErrJobQueueUnavailable      = errors.New("background job queue is unavailable")
+	ErrVirusScannerUnavailable  = errors.New("virus scanner is unavailable")
+	ErrFileScanIncomplete       = errors.New("file is unavailable until virus scan completes")
+	ErrFileInfected             = errors.New("file is infected")
+	ErrInlinePreviewUnsupported = errors.New("file type does not support inline preview")
 )
 
 type Storage interface {
@@ -209,7 +210,7 @@ func (s *Service) UploadIntoFolder(
 		s.enqueueFileScanIfEnabled(userID, file.ID, object)
 	}
 
-	return file, nil
+	return s.withAvailability(file)
 }
 
 func (s *Service) ListActive(userID int64) ([]UserFile, error) {
@@ -226,11 +227,73 @@ func (s *Service) ListActiveInFolder(
 		}
 	}
 
-	return s.repo.ListActiveInFolder(userID, parentID)
+	files, err := s.repo.ListActiveInFolder(userID, parentID)
+	if err != nil {
+		return nil, err
+	}
+
+	for index := range files {
+		if _, err := s.withAvailability(&files[index]); err != nil {
+			return nil, err
+		}
+	}
+
+	return files, nil
 }
 
 func (s *Service) ListDeleted(userID int64) ([]UserFile, error) {
-	return s.repo.ListDeleted(userID)
+	files, err := s.repo.ListDeleted(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	for index := range files {
+		if _, err := s.withAvailability(&files[index]); err != nil {
+			return nil, err
+		}
+	}
+
+	return files, nil
+}
+
+// withAvailability maps scan internals to the three product states clients
+// need. The scan signature and worker details remain server-side only.
+func (s *Service) withAvailability(file *UserFile) (*UserFile, error) {
+	if file == nil {
+		return nil, ErrFileNotFound
+	}
+	if file.Status != StatusActive {
+		file.Availability = AvailabilityUnavailable
+		return file, nil
+	}
+	if s.virusScanner == nil {
+		file.Availability = AvailabilityReady
+		return file, nil
+	}
+
+	object, err := s.repo.FindObjectForActiveFile(file.ID)
+	if err != nil {
+		return nil, err
+	}
+	scan, err := s.repo.FindFileScanByObjectID(object.ID)
+	if errors.Is(err, ErrFileScanNotFound) {
+		file.Availability = AvailabilityProcessing
+		return file, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	switch scan.Status {
+	case ScanStatusClean:
+		file.Availability = AvailabilityReady
+	case ScanStatusInfected:
+		file.Availability = AvailabilityUnavailable
+	default:
+		file.Availability = AvailabilityProcessing
+	}
+
+	return file, nil
 }
 
 func (s *Service) OpenForDownload(userID int64, fileID int64) (*UserFile, io.ReadSeekCloser, error) {
@@ -274,6 +337,42 @@ func (s *Service) OpenThumbnailForDownload(
 	}
 
 	return preview, reader, nil
+}
+
+// OpenInlinePreview opens the original image for an authenticated owner. It
+// deliberately excludes video and unknown binary types so the client cannot
+// present an unfinished streaming feature as a preview.
+func (s *Service) OpenInlinePreview(userID int64, fileID int64) (*UserFile, io.ReadSeekCloser, error) {
+	file, err := s.repo.FindActiveByID(userID, fileID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !SupportsInlinePreview(file.ContentType) {
+		return nil, nil, ErrInlinePreviewUnsupported
+	}
+
+	object, err := s.repo.FindObjectForActiveFile(fileID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := s.CheckFileObjectDownload(object.ID); err != nil {
+		return nil, nil, err
+	}
+	reader, err := s.storage.Open(file.StoragePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return file, reader, nil
+}
+
+func SupportsInlinePreview(contentType string) bool {
+	switch strings.ToLower(strings.TrimSpace(contentType)) {
+	case "image/jpeg", "image/png", "image/webp", "image/gif":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) CheckFileObjectDownload(fileObjectID int64) error {
@@ -549,7 +648,7 @@ func (s *Service) InstantUploadIntoFolder(
 		s.enqueueFileScanIfEnabled(userID, file.ID, object)
 	}
 
-	return file, nil
+	return s.withAvailability(file)
 }
 
 func (s *Service) CreateFolder(

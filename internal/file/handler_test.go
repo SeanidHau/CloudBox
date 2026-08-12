@@ -42,6 +42,7 @@ func newTestFileRouterWithQuota(t *testing.T, quotaBytes int64) (*gin.Engine, st
 	protected.GET("/files", handler.ListActive)
 	protected.GET("/files/trash", handler.ListDeleted)
 	protected.GET("/files/:id/download", handler.Download)
+	protected.GET("/files/:id/preview", handler.Preview)
 	protected.DELETE("/files/:id/permanent", handler.PermanentlyDelete)
 	protected.DELETE("/files/:id", handler.SoftDelete)
 	protected.POST("/files/:id/restore", handler.Restore)
@@ -255,6 +256,42 @@ func TestFileHandlerLifecycle(t *testing.T) {
 	}
 	if len(activeFiles.Files) != 1 || activeFiles.Files[0].ID != uploaded.File.ID {
 		t.Fatalf("active files after restore = %#v, want uploaded file", activeFiles.Files)
+	}
+}
+
+func TestFileHandlerPreviewRejectsUnsupportedType(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "notes.txt")
+	if err != nil {
+		t.Fatalf("create file part: %v", err)
+	}
+	if _, err := part.Write([]byte("notes")); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	request := newAuthenticatedRequest(http.MethodPost, "/files", &body, token)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, want %d", response.Code, http.StatusCreated)
+	}
+	var uploaded struct {
+		File UserFile `json:"file"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &uploaded); err != nil {
+		t.Fatalf("decode upload: %v", err)
+	}
+
+	preview := httptest.NewRecorder()
+	router.ServeHTTP(preview, newAuthenticatedRequest(http.MethodGet, "/files/"+strconv.FormatInt(uploaded.File.ID, 10)+"/preview", nil, token))
+	if preview.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("preview status = %d, want %d: %s", preview.Code, http.StatusUnsupportedMediaType, preview.Body.String())
 	}
 }
 

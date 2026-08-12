@@ -6,13 +6,16 @@ import (
 )
 
 const (
-	StatusActive       = "active"
-	StatusDeleted      = "deleted"
-	ScanStatusPending  = "pending"
-	ScanStatusScanning = "scanning"
-	ScanStatusClean    = "clean"
-	ScanStatusInfected = "infected"
-	ScanStatusFailed   = "failed"
+	StatusActive            = "active"
+	StatusDeleted           = "deleted"
+	AvailabilityReady       = "ready"
+	AvailabilityProcessing  = "processing"
+	AvailabilityUnavailable = "unavailable"
+	ScanStatusPending       = "pending"
+	ScanStatusScanning      = "scanning"
+	ScanStatusClean         = "clean"
+	ScanStatusInfected      = "infected"
+	ScanStatusFailed        = "failed"
 )
 
 type UserFile struct {
@@ -24,6 +27,7 @@ type UserFile struct {
 	Size         int64        `json:"size"`
 	ContentType  string       `json:"content_type"`
 	Status       string       `json:"status"`
+	Availability string       `json:"availability"`
 	CreatedAt    time.Time    `json:"created_at"`
 	DeletedAt    sql.NullTime `json:"-"`
 }

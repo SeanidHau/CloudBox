@@ -34,14 +34,14 @@ function userFacingError(message: string, status: number): string {
     "upload chunks are incomplete": "文件分片不完整，请重新上传文件。",
     "upload chunk hash does not match content": "文件分片校验失败，请重新上传文件。",
     "file hash does not match uploaded content": "文件完整性校验失败，请重新上传文件。",
-    "file scan is not complete": "文件正在等待安全扫描完成，暂时不可用。",
-    "file is infected": "该文件未通过安全扫描，无法访问。",
+    "file scan is not complete": "文件正在处理中，暂时不可用。",
+    "file is infected": "该文件当前不可访问。",
     "share not found": "分享链接不存在或已失效。",
     "share password is required": "该分享链接需要访问密码。",
     "invalid share password": "分享链接密码不正确。",
     "share has expired": "分享链接已过期。",
     "share download limit reached": "该分享链接的下载次数已用完。"
-	,"shared file is not available": "该分享文件暂时不可用，请等待安全扫描完成。"
+	,"shared file is not available": "该分享文件暂时不可用，请稍后重试。"
   };
 
   if (messages[message]) return messages[message];
@@ -49,7 +49,7 @@ function userFacingError(message: string, status: number): string {
   if (status === 403) return "你没有执行此操作的权限。";
   if (status === 404) return "请求的资源不存在，或你没有访问权限。";
   if (status === 409) return "当前操作与已有数据冲突，请刷新后重试。";
-  if (status === 423) return "文件暂时不可用，请等待安全扫描完成。";
+  if (status === 423) return "文件正在处理中，暂时不可用。";
   if (status >= 500) return "服务暂时异常，请稍后重试。";
   return "请求未能完成，请检查输入后重试。";
 }
@@ -230,6 +230,17 @@ export const api = {
   async thumbnail(id: number): Promise<Blob> {
     const session = readSession();
     const response = await fetch(`/api/files/${id}/thumbnail`, {
+      headers: session?.token ? { Authorization: `Bearer ${session.token}` } : undefined
+    });
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new ApiError(userFacingError(body?.error ?? "", response.status), response.status);
+    }
+    return response.blob();
+  },
+  async preview(id: number): Promise<Blob> {
+    const session = readSession();
+    const response = await fetch(`/api/files/${id}/preview`, {
       headers: session?.token ? { Authorization: `Bearer ${session.token}` } : undefined
     });
     if (!response.ok) {

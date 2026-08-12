@@ -764,6 +764,95 @@ func TestServiceListActiveInFolder(t *testing.T) {
 	}
 }
 
+func TestServiceListActiveMapsScanStatesToAvailability(t *testing.T) {
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		&fakeStorage{},
+		testStorageQuotaBytes,
+		WithVirusScanner(&fakeVirusScanner{}),
+	)
+
+	readyObject, err := service.repo.CreateFileObject("availability-ready", "uploads/ready.txt", 1, "text/plain")
+	if err != nil {
+		t.Fatalf("create ready object: %v", err)
+	}
+	readyFile, err := service.repo.CreateWithObject(1, "ready.txt", readyObject)
+	if err != nil {
+		t.Fatalf("create ready file: %v", err)
+	}
+	setFileScanStatus(t, service.repo, readyObject.ID, ScanStatusClean)
+
+	processingObject, err := service.repo.CreateFileObject("availability-processing", "uploads/processing.txt", 1, "text/plain")
+	if err != nil {
+		t.Fatalf("create processing object: %v", err)
+	}
+	processingFile, err := service.repo.CreateWithObject(1, "processing.txt", processingObject)
+	if err != nil {
+		t.Fatalf("create processing file: %v", err)
+	}
+	if _, _, err := service.repo.CreatePendingFileScan(processingObject.ID); err != nil {
+		t.Fatalf("create pending scan: %v", err)
+	}
+
+	unavailableObject, err := service.repo.CreateFileObject("availability-unavailable", "uploads/unavailable.txt", 1, "text/plain")
+	if err != nil {
+		t.Fatalf("create unavailable object: %v", err)
+	}
+	unavailableFile, err := service.repo.CreateWithObject(1, "unavailable.txt", unavailableObject)
+	if err != nil {
+		t.Fatalf("create unavailable file: %v", err)
+	}
+	setFileScanStatus(t, service.repo, unavailableObject.ID, ScanStatusInfected)
+
+	files, err := service.ListActive(1)
+	if err != nil {
+		t.Fatalf("list active files: %v", err)
+	}
+	availability := make(map[int64]string, len(files))
+	for _, file := range files {
+		availability[file.ID] = file.Availability
+	}
+	if availability[readyFile.ID] != AvailabilityReady || availability[processingFile.ID] != AvailabilityProcessing || availability[unavailableFile.ID] != AvailabilityUnavailable {
+		t.Fatalf("availability = %#v, want ready/processing/unavailable", availability)
+	}
+}
+
+func TestServiceListDeletedMarksFilesUnavailable(t *testing.T) {
+	service := newTestServiceWithStorage(t, &fakeStorage{})
+	file, err := service.Upload(1, "deleted.txt", "text/plain", strings.NewReader("deleted"))
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	if err := service.SoftDelete(1, file.ID); err != nil {
+		t.Fatalf("soft delete file: %v", err)
+	}
+
+	files, err := service.ListDeleted(1)
+	if err != nil {
+		t.Fatalf("list deleted files: %v", err)
+	}
+	if len(files) != 1 || files[0].Availability != AvailabilityUnavailable {
+		t.Fatalf("deleted files = %#v, want one unavailable file", files)
+	}
+}
+
+func TestSupportsInlinePreviewAllowsOnlySupportedImages(t *testing.T) {
+	for _, test := range []struct {
+		contentType string
+		want        bool
+	}{
+		{contentType: "image/jpeg", want: true},
+		{contentType: "image/png", want: true},
+		{contentType: "image/webp", want: true},
+		{contentType: "image/heic", want: false},
+		{contentType: "video/mp4", want: false},
+	} {
+		if got := SupportsInlinePreview(test.contentType); got != test.want {
+			t.Fatalf("supports inline preview %q = %t, want %t", test.contentType, got, test.want)
+		}
+	}
+}
+
 func TestServiceMoveActiveFile(t *testing.T) {
 	service := newTestServiceWithStorage(t, &fakeStorage{})
 	folder, err := service.CreateFolder(1, nil, "documents")

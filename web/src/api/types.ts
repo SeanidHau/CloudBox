@@ -7,6 +7,7 @@ export interface UserFile {
   size: number;
   content_type: string;
   status: "active" | "deleted";
+  availability: "ready" | "processing" | "unavailable";
   created_at: string;
 }
 

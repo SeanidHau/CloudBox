@@ -318,6 +318,7 @@ func main() {
 	protected.GET("/files", fileHandler.ListActive)
 	protected.GET("/files/trash", fileHandler.ListDeleted)
 	protected.GET("/files/:id/download", fileHandler.Download)
+	protected.GET("/files/:id/preview", fileHandler.Preview)
 	protected.GET("/files/:id/thumbnail", fileHandler.DownloadThumbnail)
 	protected.DELETE("/files/:id/permanent", fileHandler.PermanentlyDelete)
 	protected.DELETE("/files/:id", fileHandler.SoftDelete)
