@@ -47,6 +47,12 @@ import { Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams, 
 import { api, ApiError } from "./api/client";
 import type { Folder as FolderType, PublicShareFile, Session, Share, StorageUsage, UserFile } from "./api/types";
 import { clearSession, readSession, writeSession } from "./auth/session";
+import {
+  findUploadResumePoint,
+  removeUploadResumePoint,
+  saveUploadResumePoint,
+  taskMatchesResumePoint
+} from "./upload/resume";
 
 type Toast = { message: string; tone: "success" | "error" | "info" } | null;
 type SelectedItem =
@@ -349,14 +355,34 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
       const id = `${file.name}-${file.lastModified}-${crypto.randomUUID()}`;
       setUploads((items) => [...items, { id, name: file.name, progress: 0, state: "uploading" }]);
       try {
+        let resumeUploadID: string | undefined;
+        if (file.size > 5 * 1024 * 1024) {
+          const point = findUploadResumePoint(file, parentID);
+          if (point) {
+            const { uploads } = await api.listUploads();
+            const task = uploads.find((item) => item.id === point.uploadID);
+            if (task && taskMatchesResumePoint(task, file, parentID)) {
+              if (window.confirm(`检测到“${file.name}”的未完成上传，是否继续？`)) {
+                resumeUploadID = task.id;
+              } else {
+                await api.cancelUpload(task.id).catch(() => undefined);
+                removeUploadResumePoint(file, parentID);
+              }
+            } else {
+              removeUploadResumePoint(file, parentID);
+            }
+          }
+        }
+
         await api.uploadFile(file, parentID, (progress) => {
           setUploads((items) => items.map((item) => item.id === id ? { ...item, progress } : item));
-        });
+        }, (task) => saveUploadResumePoint(file, parentID, task), resumeUploadID);
+        removeUploadResumePoint(file, parentID);
         setUploads((items) => items.map((item) => item.id === id ? { ...item, progress: 100, state: "finished" } : item));
         window.setTimeout(() => setUploads((items) => items.filter((item) => item.id !== id)), 2600);
       } catch (err) {
         setUploads((items) => items.map((item) => item.id === id ? { ...item, state: "failed" } : item));
-        show(`${file.name} 上传失败：${messageOf(err)}`, "error");
+        show(`${file.name} 上传已暂停：${messageOf(err)}。重新选择同一文件可继续上传。`, "error");
       }
     }
     invalidateWorkspace();

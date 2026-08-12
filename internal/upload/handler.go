@@ -138,6 +138,22 @@ func (h *Handler) GetStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, status)
 }
 
+func (h *Handler) ListUploading(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+
+	tasks, err := h.service.ListUploading(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list uploads"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"uploads": tasks})
+}
+
 func (h *Handler) Complete(c *gin.Context) {
 	userID, ok := middleware.CurrentUserID(c)
 	if !ok {

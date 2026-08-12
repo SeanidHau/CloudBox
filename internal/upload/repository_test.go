@@ -106,6 +106,27 @@ func TestRepositoryCreateAndFindUploadTask(t *testing.T) {
 	}
 }
 
+func TestRepositoryListsOnlyUploadingTasksForUser(t *testing.T) {
+	repo := newTestRepository(t)
+	for _, task := range []Task{
+		{ID: "user-one-uploading", UserID: 1, OriginalName: "one.mp4", ContentType: "video/mp4", FileSize: 10, ChunkSize: 10, TotalChunks: 1, Status: StatusUploading, TempDir: "uploads/tmp/user-one-uploading"},
+		{ID: "user-one-completed", UserID: 1, OriginalName: "done.mp4", ContentType: "video/mp4", FileSize: 10, ChunkSize: 10, TotalChunks: 1, Status: StatusCompleted, TempDir: "uploads/tmp/user-one-completed"},
+		{ID: "user-two-uploading", UserID: 2, OriginalName: "two.mp4", ContentType: "video/mp4", FileSize: 10, ChunkSize: 10, TotalChunks: 1, Status: StatusUploading, TempDir: "uploads/tmp/user-two-uploading"},
+	} {
+		if _, err := repo.Create(&task); err != nil {
+			t.Fatalf("create task %q: %v", task.ID, err)
+		}
+	}
+
+	tasks, err := repo.ListUploadingByUser(1)
+	if err != nil {
+		t.Fatalf("list uploading tasks: %v", err)
+	}
+	if len(tasks) != 1 || tasks[0].ID != "user-one-uploading" {
+		t.Fatalf("uploading tasks = %#v, want user-one-uploading", tasks)
+	}
+}
+
 func TestRepositoryUpsertAndListChunks(t *testing.T) {
 	repo := newTestRepository(t)
 

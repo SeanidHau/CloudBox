@@ -71,6 +71,18 @@ export interface UploadTask {
   updated_at: string;
 }
 
+export interface UploadChunk {
+	upload_id: string;
+	number: number;
+	size: number;
+	created_at: string;
+}
+
+export interface UploadStatus {
+	upload: UploadTask;
+	chunks: UploadChunk[];
+}
+
 export interface Session {
   token: string;
   username: string;

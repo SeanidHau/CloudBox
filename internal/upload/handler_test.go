@@ -30,6 +30,7 @@ func newTestHandlerRouterWithQuota(t *testing.T, quotaBytes int64) (*gin.Engine,
 	protected := router.Group("")
 	protected.Use(middleware.Auth(testJWTSecret))
 	protected.POST("/uploads/init", handler.Init)
+	protected.GET("/uploads", handler.ListUploading)
 	protected.PUT("/uploads/:id/chunks/:number", handler.UploadChunk)
 	protected.GET("/uploads/:id", handler.GetStatus)
 	protected.POST("/uploads/:id/complete", handler.Complete)
@@ -276,6 +277,33 @@ func TestHandlerGetUploadStatus(t *testing.T) {
 	router.ServeHTTP(missingResponse, missingRequest)
 	if missingResponse.Code != http.StatusNotFound {
 		t.Fatalf("missing status = %d, want %d: %s", missingResponse.Code, http.StatusNotFound, missingResponse.Body.String())
+	}
+}
+
+func TestHandlerListsOnlyCurrentUsersUploadingTasks(t *testing.T) {
+	router, token := newTestHandlerRouter(t)
+	first := initializeUpload(t, router, token)
+	second := initializeUpload(t, router, token)
+
+	request := newAuthenticatedRequest(http.MethodGet, "/uploads", bytes.NewReader(nil), token)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+
+	var result struct {
+		Uploads []Task `json:"uploads"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(result.Uploads) != 2 {
+		t.Fatalf("upload count = %d, want 2", len(result.Uploads))
+	}
+	ids := map[string]bool{result.Uploads[0].ID: true, result.Uploads[1].ID: true}
+	if !ids[first.ID] || !ids[second.ID] {
+		t.Fatalf("uploads = %#v, want both current-user tasks", result.Uploads)
 	}
 }
 

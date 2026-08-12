@@ -1,5 +1,5 @@
 import { clearSession, readSession } from "../auth/session";
-import type { BackgroundJob, Folder, PublicShareFile, Share, StorageUsage, UploadTask, UserFile } from "./types";
+import type { BackgroundJob, Folder, PublicShareFile, Share, StorageUsage, UploadStatus, UploadTask, UserFile } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -176,14 +176,18 @@ export const api = {
       body: chunk
     });
   },
-  completeUpload: (uploadID: string) =>
-    request<{ file: UserFile }>(`/api/uploads/${uploadID}/complete`, { method: "POST" }),
-  cancelUpload: (uploadID: string) => request<void>(`/api/uploads/${uploadID}`, { method: "DELETE" }),
-  async uploadFile(
-    file: File,
-    parentId: number | null,
-    onProgress?: (value: number) => void
-  ): Promise<{ file: UserFile }> {
+	completeUpload: (uploadID: string) =>
+		request<{ file: UserFile }>(`/api/uploads/${uploadID}/complete`, { method: "POST" }),
+	getUploadStatus: (uploadID: string) => request<UploadStatus>(`/api/uploads/${uploadID}`),
+	listUploads: () => request<{ uploads: UploadTask[] }>("/api/uploads"),
+	cancelUpload: (uploadID: string) => request<void>(`/api/uploads/${uploadID}`, { method: "DELETE" }),
+	async uploadFile(
+		file: File,
+		parentId: number | null,
+		onProgress?: (value: number) => void,
+		onTask?: (upload: UploadTask) => void,
+		resumeUploadID?: string,
+	): Promise<{ file: UserFile }> {
     const chunkSize = 5 * 1024 * 1024;
     if (file.size <= chunkSize) {
       const result = await this.upload(file, parentId);
@@ -191,21 +195,38 @@ export const api = {
       return result;
     }
 
-    const { upload } = await this.initUpload(file, parentId, chunkSize);
-    try {
-      // 服务端分片编号从 0 开始，最后一片允许小于 chunk_size。
-      for (let number = 0; number < upload.total_chunks; number += 1) {
-        const start = number * upload.chunk_size;
-        const end = Math.min(start + upload.chunk_size, file.size);
-        await this.uploadChunk(upload.id, number, file.slice(start, end));
-        onProgress?.(Math.round(((number + 1) / upload.total_chunks) * 100));
-      }
-      return await this.completeUpload(upload.id);
-    } catch (error) {
-      await this.cancelUpload(upload.id).catch(() => undefined);
-      throw error;
-    }
-  },
+		let upload: UploadTask;
+		let uploadedNumbers = new Set<number>();
+		if (resumeUploadID) {
+			const status = await this.getUploadStatus(resumeUploadID);
+			upload = status.upload;
+			if (
+				upload.status !== "uploading" ||
+				upload.original_name !== file.name ||
+				upload.file_size !== file.size ||
+				upload.parent_id !== parentId
+			) {
+				throw new ApiError("上传任务与当前文件不匹配，请重新开始上传。", 409);
+			}
+			uploadedNumbers = new Set(status.chunks.map((chunk) => chunk.number));
+		} else {
+			const initialized = await this.initUpload(file, parentId, chunkSize);
+			upload = initialized.upload;
+		}
+
+		onTask?.(upload);
+		onProgress?.(Math.round((uploadedNumbers.size / upload.total_chunks) * 100));
+		// 服务端分片编号从 0 开始，已确认的分片不会重复传输。
+		for (let number = 0; number < upload.total_chunks; number += 1) {
+			if (uploadedNumbers.has(number)) continue;
+			const start = number * upload.chunk_size;
+			const end = Math.min(start + upload.chunk_size, file.size);
+			await this.uploadChunk(upload.id, number, file.slice(start, end));
+			uploadedNumbers.add(number);
+			onProgress?.(Math.round((uploadedNumbers.size / upload.total_chunks) * 100));
+		}
+		return await this.completeUpload(upload.id);
+	},
   async thumbnail(id: number): Promise<Blob> {
     const session = readSession();
     const response = await fetch(`/api/files/${id}/thumbnail`, {

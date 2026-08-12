@@ -80,6 +80,10 @@ func (s *Service) Init(
 	)
 }
 
+func (s *Service) ListUploading(userID int64) ([]Task, error) {
+	return s.repo.ListUploadingByUser(userID)
+}
+
 func (s *Service) InitInFolder(
 	userID int64,
 	parentID *int64,

@@ -324,6 +324,7 @@ func main() {
 	protected.POST("/files/:id/restore", fileHandler.Restore)
 	protected.POST("/files/:id/verify", fileHandler.EnqueueVerification)
 	protected.POST("/uploads/init", uploadHandler.Init)
+	protected.GET("/uploads", uploadHandler.ListUploading)
 	protected.PUT("/uploads/:id/chunks/:number", uploadHandler.UploadChunk)
 	protected.POST("/uploads/:id/complete", uploadHandler.Complete)
 	protected.GET("/uploads/:id", uploadHandler.GetStatus)

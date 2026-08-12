@@ -51,6 +51,38 @@ func (r *Repository) FindByID(userID int64, taskID string) (*Task, error) {
 	return scanTask(row)
 }
 
+// ListUploadingByUser returns tasks that can still accept chunks. The client
+// uses a local file fingerprint to decide whether one of these tasks belongs
+// to a newly selected local file.
+func (r *Repository) ListUploadingByUser(userID int64) ([]Task, error) {
+	rows, err := r.db.Query(
+		`SELECT id, user_id, parent_id, original_name, content_type, file_size, chunk_size, total_chunks, file_hash, status, temp_dir, created_at, updated_at
+		 FROM upload_tasks
+		 WHERE user_id = $1 AND status = $2
+		 ORDER BY updated_at DESC`,
+		userID,
+		StatusUploading,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tasks := make([]Task, 0)
+	for rows.Next() {
+		task, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, *task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return tasks, nil
+}
+
 func (r *Repository) UpsertChunk(chunk *Chunk) (*Chunk, error) {
 	_, err := r.db.Exec(
 		`INSERT INTO upload_chunks (upload_id, chunk_number, size, chunk_hash) VALUES ($1, $2, $3, $4) ON CONFLICT(upload_id, chunk_number) DO UPDATE SET size = excluded.size, chunk_hash = excluded.chunk_hash`,
