@@ -26,6 +26,10 @@ type saveShareRequest struct {
 	ParentID *int64 `json:"parent_id"`
 }
 
+func publicSharePassword(c *gin.Context) string {
+	return c.GetHeader("X-Share-Password")
+}
+
 func NewHandler(service *Service) *Handler {
 	return &Handler{
 		service: service,
@@ -77,7 +81,7 @@ func (h *Handler) Create(c *gin.Context) {
 func (h *Handler) Download(c *gin.Context) {
 	file, reader, err := h.service.OpenForDownload(
 		c.Param("token"),
-		c.GetHeader("X-Share-Password"),
+		publicSharePassword(c),
 	)
 	if errors.Is(err, ErrShareNotFound) || errors.Is(err, ErrFileNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "share not found"})
@@ -105,6 +109,44 @@ func (h *Handler) Download(c *gin.Context) {
 	c.Header("Content-Type", file.ContentType)
 
 	http.ServeContent(c.Writer, c.Request, file.OriginalName, time.Time{}, reader)
+}
+
+func (h *Handler) PublicInfo(c *gin.Context) {
+	file, err := h.service.GetPublicFile(c.Param("token"), publicSharePassword(c))
+	if writeShareAccessError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"file": file})
+}
+
+func (h *Handler) PublicPreview(c *gin.Context) {
+	preview, reader, err := h.service.OpenPublicPreview(c.Param("token"), publicSharePassword(c))
+	if writeShareAccessError(c, err) {
+		return
+	}
+	defer reader.Close()
+
+	c.Header("Content-Disposition", `inline; filename="preview.png"`)
+	c.Header("Content-Type", preview.ContentType)
+	http.ServeContent(c.Writer, c.Request, "preview.png", preview.CreatedAt, reader)
+}
+
+func writeShareAccessError(c *gin.Context, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, ErrShareNotFound), errors.Is(err, ErrFileNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "share not found"})
+	case errors.Is(err, ErrSharePasswordRequired), errors.Is(err, ErrSharePasswordInvalid):
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid share password"})
+	case errors.Is(err, ErrShareExpired), errors.Is(err, ErrDownloadLimitReached):
+		c.JSON(http.StatusGone, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrSharedFileUnavailable):
+		c.JSON(http.StatusLocked, gin.H{"error": "shared file is not available"})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to access shared file"})
+	}
+	return true
 }
 
 func (h *Handler) Save(c *gin.Context) {

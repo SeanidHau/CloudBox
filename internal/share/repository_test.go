@@ -27,6 +27,7 @@ func newTestRepository(t *testing.T) *Repository {
 		"../../migrations/002_file_objects.sql",
 		"../../migrations/005_folders.sql",
 		"../../migrations/007_file_shares.sql",
+		"../../migrations/010_file_preview.sql",
 	); err != nil {
 		t.Fatalf("migrate database: %v", err)
 	}

@@ -251,7 +251,8 @@ func (h *Handler) SoftDelete(c *gin.Context) {
 		return
 	}
 
-	err = h.service.SoftDelete(userID, fileID)
+	keepShares := c.Query("keep_shares") == "true"
+	err = h.service.SoftDeleteWithShareOption(userID, fileID, keepShares)
 	if errors.Is(err, ErrFileNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
 		return

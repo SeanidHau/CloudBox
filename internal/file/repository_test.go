@@ -104,6 +104,45 @@ func TestRepositoryCreateListSoftDeleteAndRestore(t *testing.T) {
 	}
 }
 
+func TestRepositorySoftDeleteRevokesSharesUnlessExplicitlyKept(t *testing.T) {
+	repo := newTestRepository(t)
+
+	defaultFile, err := repo.Create(1, "default.txt", "uploads/default.txt", 10, "text/plain")
+	if err != nil {
+		t.Fatalf("create default file: %v", err)
+	}
+	if _, err := repo.db.Exec(`INSERT INTO file_shares (token, user_file_id) VALUES ($1, $2)`, "default-delete-share", defaultFile.ID); err != nil {
+		t.Fatalf("create default share: %v", err)
+	}
+	if err := repo.SoftDelete(1, defaultFile.ID); err != nil {
+		t.Fatalf("soft delete default file: %v", err)
+	}
+	var count int
+	if err := repo.db.QueryRow(`SELECT COUNT(*) FROM file_shares WHERE user_file_id = $1`, defaultFile.ID).Scan(&count); err != nil {
+		t.Fatalf("count default shares: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("default delete share count = %d, want 0", count)
+	}
+
+	keptFile, err := repo.Create(1, "kept.txt", "uploads/kept.txt", 10, "text/plain")
+	if err != nil {
+		t.Fatalf("create kept file: %v", err)
+	}
+	if _, err := repo.db.Exec(`INSERT INTO file_shares (token, user_file_id) VALUES ($1, $2)`, "kept-delete-share", keptFile.ID); err != nil {
+		t.Fatalf("create kept share: %v", err)
+	}
+	if err := repo.SoftDeleteWithShareOption(1, keptFile.ID, true); err != nil {
+		t.Fatalf("soft delete kept file: %v", err)
+	}
+	if err := repo.db.QueryRow(`SELECT COUNT(*) FROM file_shares WHERE user_file_id = $1`, keptFile.ID).Scan(&count); err != nil {
+		t.Fatalf("count kept shares: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("explicitly kept share count = %d, want 1", count)
+	}
+}
+
 func TestRepositoryCreatesAndSharesFilePreview(t *testing.T) {
 	repo := newTestRepository(t)
 

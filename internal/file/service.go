@@ -433,6 +433,10 @@ func (s *Service) SoftDelete(userID int64, fileID int64) error {
 	return s.repo.SoftDelete(userID, fileID)
 }
 
+func (s *Service) SoftDeleteWithShareOption(userID int64, fileID int64, keepShares bool) error {
+	return s.repo.SoftDeleteWithShareOption(userID, fileID, keepShares)
+}
+
 func (s *Service) Restore(userID int64, fileID int64) error {
 	return s.repo.Restore(userID, fileID)
 }

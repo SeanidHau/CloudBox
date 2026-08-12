@@ -27,12 +27,23 @@ export interface StorageUsage {
 }
 
 export interface Share {
-  token: string;
-  user_file_id: number;
+	token: string;
+	user_file_id: number;
   expires_at: string | null;
   max_downloads: number | null;
-  download_count: number;
-  created_at: string;
+	download_count: number;
+	created_at: string;
+	original_name: string;
+	size: number;
+	content_type: string;
+	has_preview: boolean;
+}
+
+export interface PublicShareFile {
+	original_name: string;
+	size: number;
+	content_type: string;
+	has_preview: boolean;
 }
 
 export interface BackgroundJob {

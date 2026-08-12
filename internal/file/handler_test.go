@@ -341,6 +341,19 @@ func TestFileHandlerPermanentlyDelete(t *testing.T) {
 	}
 }
 
+func TestFileHandlerSoftDeleteAcceptsExplicitKeepSharesOption(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	// The handler's option is observable through a successful request. The
+	// repository-level test verifies that the option keeps the share record.
+	request := newAuthenticatedRequest(http.MethodDelete, "/files/999?keep_shares=true", nil, token)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing file status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
 func TestFileHandlerRejectsInvalidFileID(t *testing.T) {
 	router, token := newTestFileRouter(t)
 

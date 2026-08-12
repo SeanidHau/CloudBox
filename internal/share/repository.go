@@ -136,6 +136,27 @@ func (r *Repository) FindActiveFileByShareToken(token string) (*SharedFile, erro
 	return &file, nil
 }
 
+func (r *Repository) FindPreviewByShareToken(token string) (*SharedPreview, error) {
+	var preview SharedPreview
+
+	err := r.db.QueryRow(
+		`SELECT fp.storage_path, fp.content_type, fp.created_at
+		 FROM file_shares AS fs
+		 JOIN user_files AS uf ON uf.id = fs.user_file_id
+		 JOIN file_previews AS fp ON fp.file_object_id = uf.object_id
+		 WHERE fs.token = $1 AND uf.status = 'active'`,
+		token,
+	).Scan(&preview.StoragePath, &preview.ContentType, &preview.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrFileNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &preview, nil
+}
+
 func (r *Repository) ReserveDownload(token string) (bool, error) {
 	result, err := r.db.Exec(
 		`UPDATE file_shares SET download_count = download_count + 1 WHERE token = $1 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) AND (max_downloads IS NULL OR download_count < max_downloads)`,
@@ -165,7 +186,13 @@ func (r *Repository) ReleaseDownloadReservation(token string) error {
 
 func (r *Repository) ListByUser(userID int64) ([]Share, error) {
 	rows, err := r.db.Query(
-		`SELECT fs.token, fs.user_file_id, fs.password_hash, fs.expires_at, fs.max_downloads, fs.download_count, fs.created_at FROM file_shares AS fs JOIN user_files AS uf ON uf.id = fs.user_file_id WHERE uf.user_id = $1 ORDER BY fs.created_at DESC`,
+		`SELECT fs.token, fs.user_file_id, fs.password_hash, fs.expires_at, fs.max_downloads, fs.download_count, fs.created_at,
+			uf.original_name, uf.size, uf.content_type,
+			EXISTS(SELECT 1 FROM file_previews AS fp WHERE fp.file_object_id = uf.object_id)
+		 FROM file_shares AS fs
+		 JOIN user_files AS uf ON uf.id = fs.user_file_id
+		 WHERE uf.user_id = $1
+		 ORDER BY fs.created_at DESC`,
 		userID,
 	)
 	if err != nil {
@@ -176,7 +203,7 @@ func (r *Repository) ListByUser(userID int64) ([]Share, error) {
 	shares := make([]Share, 0)
 
 	for rows.Next() {
-		share, err := scanShare(rows)
+		share, err := scanShareWithFile(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -189,6 +216,44 @@ func (r *Repository) ListByUser(userID int64) ([]Share, error) {
 	}
 
 	return shares, nil
+}
+
+func scanShareWithFile(scanner shareScanner) (*Share, error) {
+	var (
+		share        Share
+		passwordHash sql.NullString
+		expiresAt    sql.NullTime
+		maxDownloads sql.NullInt64
+	)
+
+	err := scanner.Scan(
+		&share.Token,
+		&share.UserFileID,
+		&passwordHash,
+		&expiresAt,
+		&maxDownloads,
+		&share.DownloadCount,
+		&share.CreatedAt,
+		&share.OriginalName,
+		&share.Size,
+		&share.ContentType,
+		&share.HasPreview,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if passwordHash.Valid {
+		share.PasswordHash = passwordHash.String
+	}
+	if expiresAt.Valid {
+		share.ExpiresAt = &expiresAt.Time
+	}
+	if maxDownloads.Valid {
+		share.MaxDownloads = &maxDownloads.Int64
+	}
+
+	return &share, nil
 }
 
 func (r *Repository) DeleteByToken(userID int64, token string) error {

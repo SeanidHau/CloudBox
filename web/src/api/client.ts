@@ -1,5 +1,5 @@
 import { clearSession, readSession } from "../auth/session";
-import type { BackgroundJob, Folder, Share, StorageUsage, UploadTask, UserFile } from "./types";
+import type { BackgroundJob, Folder, PublicShareFile, Share, StorageUsage, UploadTask, UserFile } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -76,6 +76,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await response.json()) as T;
 }
 
+async function publicRequest<T>(path: string, password: string): Promise<T> {
+	const headers = password ? { "X-Share-Password": password } : undefined;
+	const response = await fetch(path, { headers });
+	if (!response.ok) {
+		const body = (await response.json().catch(() => null)) as { error?: string } | null;
+		throw new ApiError(userFacingError(body?.error ?? "", response.status), response.status);
+	}
+	return (await response.json()) as T;
+}
+
 export const api = {
   login: (username: string, password: string) =>
     request<{ token: string }>("/api/auth/login", {
@@ -128,7 +138,8 @@ export const api = {
       body: JSON.stringify({ parent_id: parentId })
     }),
   deleteFolder: (id: number) => request<void>(`/api/folders/${id}`, { method: "DELETE" }),
-  deleteFile: (id: number) => request<void>(`/api/files/${id}`, { method: "DELETE" }),
+	deleteFile: (id: number, keepShares = false) =>
+		request<void>(`/api/files/${id}${keepShares ? "?keep_shares=true" : ""}`, { method: "DELETE" }),
   restoreFile: (id: number) => request<void>(`/api/files/${id}/restore`, { method: "POST" }),
   permanentlyDeleteFile: (id: number) => request<void>(`/api/files/${id}/permanent`, { method: "DELETE" }),
   listShares: () => request<{ shares: Share[] }>("/api/shares"),
@@ -137,7 +148,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input)
     }),
-  revokeShare: (token: string) => request<void>(`/api/shares/${token}`, { method: "DELETE" }),
+	revokeShare: (token: string) => request<void>(`/api/shares/${token}`, { method: "DELETE" }),
+	publicShareInfo: (token: string, password: string) =>
+		publicRequest<{ file: PublicShareFile }>(`/api/shares/${encodeURIComponent(token)}`, password),
   saveSharedFile: (token: string, password: string, parentId: number | null) =>
     request<{ file: UserFile }>(`/api/shares/${encodeURIComponent(token)}/save`, {
       method: "POST",
@@ -223,15 +236,27 @@ export const api = {
     anchor.click();
     URL.revokeObjectURL(url);
   },
+	async publicSharePreview(token: string, password: string): Promise<Blob> {
+		const headers = password ? { "X-Share-Password": password } : undefined;
+		const response = await fetch(`/api/shares/${encodeURIComponent(token)}/preview`, { headers });
+		if (!response.ok) {
+			const body = (await response.json().catch(() => null)) as { error?: string } | null;
+			throw new ApiError(userFacingError(body?.error ?? "", response.status), response.status);
+		}
+		return response.blob();
+	},
   async downloadShared(token: string, password: string) {
-    const headers = password ? { "X-Share-Password": password } : undefined;
-    const response = await fetch(`/api/shares/${encodeURIComponent(token)}/download`, { headers });
-    if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      throw new ApiError(userFacingError(body?.error ?? "", response.status), response.status);
-    }
+		const session = readSession();
+		const headers = new Headers();
+		if (session?.token) headers.set("Authorization", `Bearer ${session.token}`);
+		if (password) headers.set("X-Share-Password", password);
+		const response = await fetch(`/api/shares/${encodeURIComponent(token)}/download`, { headers });
+		if (!response.ok) {
+			const body = (await response.json().catch(() => null)) as { error?: string } | null;
+			throw new ApiError(userFacingError(body?.error ?? "", response.status), response.status);
+		}
 
-    const blob = await response.blob();
+		const blob = await response.blob();
     const disposition = response.headers.get("Content-Disposition") ?? "";
     const name = disposition.match(/filename="?([^";]+)"?/)?.[1] ?? "download";
     const url = URL.createObjectURL(blob);

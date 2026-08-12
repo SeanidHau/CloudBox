@@ -127,6 +127,55 @@ func TestServiceCreateShare(t *testing.T) {
 	}
 }
 
+func TestServiceCreateShareUsesSevenDayDefaultExpiry(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, nil)
+	fileID := createTestFile(t, repo, 1, "active")
+	before := time.Now().UTC().Add(DefaultShareLifetime - time.Second)
+
+	created, err := service.Create(1, fileID, "", nil, nil)
+	if err != nil {
+		t.Fatalf("create share: %v", err)
+	}
+	if created.ExpiresAt == nil {
+		t.Fatal("default share expiry should be set")
+	}
+	if created.ExpiresAt.Before(before) || created.ExpiresAt.After(time.Now().UTC().Add(DefaultShareLifetime+time.Second)) {
+		t.Fatalf("default expiry = %v, want roughly seven days from now", created.ExpiresAt)
+	}
+}
+
+func TestServicePublicInfoDoesNotConsumeDownloadLimit(t *testing.T) {
+	repo := newTestRepository(t)
+	service := NewService(repo, nil)
+	fileID := createTestFile(t, repo, 1, "active")
+	maxDownloads := int64(1)
+	share, err := service.Create(1, fileID, "share-password", nil, &maxDownloads)
+	if err != nil {
+		t.Fatalf("create share: %v", err)
+	}
+
+	if _, err := service.GetPublicFile(share.Token, ""); !errors.Is(err, ErrSharePasswordRequired) {
+		t.Fatalf("unverified public info error = %v, want %v", err, ErrSharePasswordRequired)
+	}
+
+	info, err := service.GetPublicFile(share.Token, "share-password")
+	if err != nil {
+		t.Fatalf("get verified public info: %v", err)
+	}
+	if info.OriginalName != "document.txt" || info.Size != 15 || info.ContentType != "text/plain" {
+		t.Fatalf("public info = %#v, want document metadata", info)
+	}
+
+	current, err := repo.FindByToken(share.Token)
+	if err != nil {
+		t.Fatalf("find share: %v", err)
+	}
+	if current.DownloadCount != 0 {
+		t.Fatalf("download count after public info = %d, want 0", current.DownloadCount)
+	}
+}
+
 func TestServiceCreateValidatesInput(t *testing.T) {
 	repo := newTestRepository(t)
 	service := NewService(repo, nil)

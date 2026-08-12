@@ -289,7 +289,20 @@ func (r *Repository) ListDeleted(userID int64) ([]UserFile, error) {
 }
 
 func (r *Repository) SoftDelete(userID int64, fileID int64) error {
-	result, err := r.db.Exec(
+	return r.SoftDeleteWithShareOption(userID, fileID, false)
+}
+
+// SoftDeleteWithShareOption moves a file to trash. Shares are revoked by
+// default so a deleted source cannot remain publicly reachable; callers must
+// explicitly opt in to retaining them.
+func (r *Repository) SoftDeleteWithShareOption(userID int64, fileID int64, keepShares bool) error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec(
 		`UPDATE user_files SET status = $1, deleted_at = CURRENT_TIMESTAMP WHERE id = $2 AND user_id = $3 AND status = $4`,
 		StatusDeleted,
 		fileID,
@@ -310,7 +323,13 @@ func (r *Repository) SoftDelete(userID int64, fileID int64) error {
 		return ErrFileNotFound
 	}
 
-	return nil
+	if !keepShares {
+		if _, err := tx.Exec(`DELETE FROM file_shares WHERE user_file_id = $1`, fileID); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (r *Repository) ListDeletedBefore(before time.Time) ([]UserFile, error) {

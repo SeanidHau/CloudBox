@@ -23,6 +23,8 @@ var (
 	ErrShareSaveUnavailable   = errors.New("shared file save is unavailable")
 )
 
+const DefaultShareLifetime = 7 * 24 * time.Hour
+
 type Storage interface {
 	Open(storagePath string) (io.ReadSeekCloser, error)
 }
@@ -97,7 +99,12 @@ func (s *Service) Create(
 		return nil, ErrFileNotFound
 	}
 
-	if expiresAt != nil && !expiresAt.After(time.Now()) {
+	if expiresAt == nil {
+		defaultExpiry := time.Now().UTC().Add(DefaultShareLifetime)
+		expiresAt = &defaultExpiry
+	}
+
+	if !expiresAt.After(time.Now()) {
 		return nil, ErrShareExpirationInvalid
 	}
 
@@ -132,6 +139,46 @@ func (s *Service) Create(
 	})
 }
 
+// GetPublicFile verifies that a visitor may view share information. Unlike a
+// download, it never reserves a download slot, so opening an image preview
+// cannot exhaust a limited share.
+func (s *Service) GetPublicFile(token string, password string) (*PublicFile, error) {
+	sharedFile, err := s.findAccessibleFile(token, password, false)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = s.repo.FindPreviewByShareToken(token)
+	hasPreview := err == nil
+	if err != nil && !errors.Is(err, ErrFileNotFound) {
+		return nil, err
+	}
+
+	return &PublicFile{
+		OriginalName: sharedFile.OriginalName,
+		Size:         sharedFile.Size,
+		ContentType:  sharedFile.ContentType,
+		HasPreview:   hasPreview,
+	}, nil
+}
+
+func (s *Service) OpenPublicPreview(token string, password string) (*SharedPreview, io.ReadSeekCloser, error) {
+	if _, err := s.findAccessibleFile(token, password, false); err != nil {
+		return nil, nil, err
+	}
+
+	preview, err := s.repo.FindPreviewByShareToken(token)
+	if err != nil {
+		return nil, nil, err
+	}
+	reader, err := s.storage.Open(preview.StoragePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return preview, reader, nil
+}
+
 func generateToken() (string, error) {
 	tokenBytes := make([]byte, 32)
 
@@ -146,24 +193,9 @@ func (s *Service) OpenForDownload(
 	token string,
 	password string,
 ) (*SharedFile, io.ReadSeekCloser, error) {
-	share, err := s.repo.FindByToken(token)
+	file, err := s.findAccessibleFile(token, password, true)
 	if err != nil {
 		return nil, nil, err
-	}
-
-	if err := validateShareAccess(share, password); err != nil {
-		return nil, nil, err
-	}
-
-	file, err := s.repo.FindActiveFileByShareToken(token)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if s.downloadPolicy != nil {
-		if err := s.downloadPolicy.CheckFileObjectDownload(file.ObjectID); err != nil {
-			return nil, nil, fmt.Errorf("%w: %v", ErrSharedFileUnavailable, err)
-		}
 	}
 
 	reader, err := s.storage.Open(file.StoragePath)
@@ -193,6 +225,29 @@ func (s *Service) OpenForDownload(
 	return file, reader, nil
 }
 
+func (s *Service) findAccessibleFile(token string, password string, requireDownloadSlot bool) (*SharedFile, error) {
+	share, err := s.repo.FindByToken(token)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validateShareAccess(share, password, requireDownloadSlot); err != nil {
+		return nil, err
+	}
+
+	file, err := s.repo.FindActiveFileByShareToken(token)
+	if err != nil {
+		return nil, err
+	}
+	if s.downloadPolicy != nil {
+		if err := s.downloadPolicy.CheckFileObjectDownload(file.ObjectID); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrSharedFileUnavailable, err)
+		}
+	}
+
+	return file, nil
+}
+
 // SaveToUserFiles adds the shared object to a user's workspace. It applies
 // the same access and scan checks as a public download, while the file module
 // remains responsible for target-folder ownership and storage quota checks.
@@ -210,7 +265,7 @@ func (s *Service) SaveToUserFiles(
 	if err != nil {
 		return nil, err
 	}
-	if err := validateShareAccess(share, password); err != nil {
+	if err := validateShareAccess(share, password, true); err != nil {
 		return nil, err
 	}
 
@@ -249,7 +304,7 @@ func (s *Service) SaveToUserFiles(
 	return file, nil
 }
 
-func validateShareAccess(share *Share, password string) error {
+func validateShareAccess(share *Share, password string, requireDownloadSlot bool) error {
 	if share.ExpiresAt != nil && !share.ExpiresAt.After(time.Now()) {
 		return ErrShareExpired
 	}
@@ -267,7 +322,7 @@ func validateShareAccess(share *Share, password string) error {
 		}
 	}
 
-	if share.MaxDownloads != nil && share.DownloadCount >= *share.MaxDownloads {
+	if requireDownloadSlot && share.MaxDownloads != nil && share.DownloadCount >= *share.MaxDownloads {
 		return ErrDownloadLimitReached
 	}
 

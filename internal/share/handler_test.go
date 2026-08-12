@@ -48,6 +48,7 @@ func TestHandlerCreateAndDownloadShare(t *testing.T) {
 		handler.Revoke(c)
 	})
 	router.GET("/api/shares/:token/download", handler.Download)
+	router.GET("/api/shares/:token", handler.PublicInfo)
 
 	createRequest := httptest.NewRequest(
 		http.MethodPost,
@@ -144,6 +145,39 @@ func TestHandlerCreateAndDownloadShare(t *testing.T) {
 	router.ServeHTTP(revokedDownloadRecorder, revokedDownloadRequest)
 	if revokedDownloadRecorder.Code != http.StatusNotFound {
 		t.Fatalf("revoked download status = %d, want %d: %s", revokedDownloadRecorder.Code, http.StatusNotFound, revokedDownloadRecorder.Body.String())
+	}
+}
+
+func TestHandlerPublicInfoRequiresPasswordBeforeDisclosingFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, repo, service := newTestHandler(t)
+	fileID := createTestFile(t, repo, 1, "active")
+	share, err := service.Create(1, fileID, "share-password", nil, nil)
+	if err != nil {
+		t.Fatalf("create share: %v", err)
+	}
+
+	router := gin.New()
+	router.GET("/shares/:token", handler.PublicInfo)
+
+	unauthorized := httptest.NewRecorder()
+	router.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/shares/"+share.Token, nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unverified public info status = %d, want %d", unauthorized.Code, http.StatusUnauthorized)
+	}
+	if strings.Contains(unauthorized.Body.String(), "document.txt") {
+		t.Fatalf("unverified response leaks file name: %s", unauthorized.Body.String())
+	}
+
+	verifiedRequest := httptest.NewRequest(http.MethodGet, "/shares/"+share.Token, nil)
+	verifiedRequest.Header.Set("X-Share-Password", "share-password")
+	verified := httptest.NewRecorder()
+	router.ServeHTTP(verified, verifiedRequest)
+	if verified.Code != http.StatusOK {
+		t.Fatalf("verified public info status = %d, want %d: %s", verified.Code, http.StatusOK, verified.Body.String())
+	}
+	if !strings.Contains(verified.Body.String(), "document.txt") {
+		t.Fatalf("verified response should include file name: %s", verified.Body.String())
 	}
 }
 

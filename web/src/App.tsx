@@ -45,7 +45,7 @@ import {
 } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "./api/client";
-import type { Folder as FolderType, Session, Share, StorageUsage, UserFile } from "./api/types";
+import type { Folder as FolderType, PublicShareFile, Session, Share, StorageUsage, UserFile } from "./api/types";
 import { clearSession, readSession, writeSession } from "./auth/session";
 
 type Toast = { message: string; tone: "success" | "error" | "info" } | null;
@@ -96,7 +96,9 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
       const next = { token, username };
       writeSession(next);
       onAuthenticated(next);
-      navigate("/files", { replace: true });
+      const pendingDownload = sessionStorage.getItem("cloudbox.pending-share-download");
+      const destination = new URLSearchParams(location.search).get("next");
+      navigate(pendingDownload && destination?.startsWith("/share/") ? destination : "/files", { replace: true });
     } catch (err) {
       setError(messageOf(err));
     } finally {
@@ -147,14 +149,58 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
 }
 
 function PublicSharePage() {
-  const { token = "" } = useParams();
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [downloading, setDownloading] = useState(false);
+	const { token = "" } = useParams();
+	const [password, setPassword] = useState("");
+	const [error, setError] = useState("");
+	const [file, setFile] = useState<PublicShareFile | null>(null);
+	const [preview, setPreview] = useState<string | null>(null);
+	const [loading, setLoading] = useState(false);
+	const [downloading, setDownloading] = useState(false);
+	const navigate = useNavigate();
 
-  async function download(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError("");
+	useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
+	useEffect(() => {
+		const pending = sessionStorage.getItem("cloudbox.pending-share-download");
+		if (!pending || !readSession()) return;
+		try {
+			const parsed = JSON.parse(pending) as { token?: string; password?: string };
+			if (parsed.token !== token) return;
+			sessionStorage.removeItem("cloudbox.pending-share-download");
+			setPassword(parsed.password ?? "");
+			void api.downloadShared(token, parsed.password ?? "").catch((err) => setError(messageOf(err)));
+		} catch {
+			sessionStorage.removeItem("cloudbox.pending-share-download");
+		}
+	}, [token]);
+
+	async function unlock(event: FormEvent<HTMLFormElement>) {
+		event.preventDefault();
+		setError("");
+		setLoading(true);
+		try {
+			const { file: sharedFile } = await api.publicShareInfo(token, password);
+			setFile(sharedFile);
+			if (sharedFile.has_preview && sharedFile.content_type.startsWith("image/")) {
+				const blob = await api.publicSharePreview(token, password);
+				setPreview(URL.createObjectURL(blob));
+			}
+		} catch (err) {
+			setFile(null);
+			setError(messageOf(err));
+		} finally {
+			setLoading(false);
+		}
+	}
+
+	async function download(event: FormEvent<HTMLFormElement>) {
+		event.preventDefault();
+		const session = readSession();
+		if (!session) {
+			sessionStorage.setItem("cloudbox.pending-share-download", JSON.stringify({ token, password }));
+			navigate(`/login?next=${encodeURIComponent(`/share/${token}`)}`, { replace: true });
+			return;
+		}
+		setError("");
     setDownloading(true);
     try {
       // 密码只在本次下载请求中作为请求头发送，不会保存到浏览器存储。
@@ -174,20 +220,29 @@ function PublicSharePage() {
       <section className="public-share-card" aria-label="共享文件下载">
         <div className="public-share-icon"><Share2 size={28} /></div>
         <p className="eyebrow">SHARED FILE</p>
-        <h1>有人向你分享了一个文件</h1>
-        <p className="public-share-copy">该链接无需登录。若分享者设置了访问密码，请输入后开始下载。</p>
-        <form className="public-share-form" onSubmit={download}>
+        <h1>{file ? file.original_name : "有人向你分享了一个文件"}</h1>
+        <p className="public-share-copy">验证访问权限后可查看图片预览。下载或保存文件需要登录。</p>
+        {file?.has_preview && preview && <img className="public-share-preview" src={preview} alt={`${file.original_name} 预览`} />}
+        {file && !file.has_preview && <p className="public-share-file-meta">{shortType(file.content_type)} · {formatBytes(file.size)}{file.content_type.startsWith("video/") && " · 视频暂不支持在线播放"}</p>}
+        {!file && <form className="public-share-form" onSubmit={unlock}>
           <label>
             访问密码 <span className="optional">如有</span>
             <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="未设置密码则留空" autoComplete="current-password" />
           </label>
           {error && <p className="form-error">{error}</p>}
+          <button className="primary-button public-share-download" type="submit" disabled={loading || !token}>
+            {loading ? <LoaderCircle size={17} className="spin" /> : <ShieldCheck size={17} />}
+            {loading ? "正在验证" : "查看分享内容"}
+          </button>
+        </form>}
+        {file && <form className="public-share-form" onSubmit={download}>
+          {error && <p className="form-error">{error}</p>}
           <button className="primary-button public-share-download" type="submit" disabled={downloading || !token}>
             {downloading ? <LoaderCircle size={17} className="spin" /> : <Download size={17} />}
-            {downloading ? "正在准备下载" : "下载文件"}
+            {downloading ? "正在准备下载" : "登录后下载文件"}
           </button>
-        </form>
-        <p className="public-share-note"><ShieldCheck size={15} />下载受分享者设置的过期时间和下载次数限制。</p>
+        </form>}
+        <p className="public-share-note"><ShieldCheck size={15} />图片预览不计入下载次数；实际下载或保存副本会受分享限制约束。</p>
       </section>
     </main>
   );
@@ -308,10 +363,16 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   }
 
   async function removeFile(file: UserFile, permanent = false) {
-    if (!window.confirm(permanent ? `彻底删除“${file.original_name}”？该操作不可恢复。` : `将“${file.original_name}”移入回收站？`)) return;
+    let keepShares = false;
+    if (permanent) {
+      if (!window.confirm(`彻底删除“${file.original_name}”？该操作不可恢复。`)) return;
+    } else if (!window.confirm(`将“${file.original_name}”移入回收站，并撤销全部分享链接？`)) {
+      if (!window.confirm("是否保留已有分享链接并继续移入回收站？保留后，持有链接的人仍可访问该文件。")) return;
+      keepShares = true;
+    }
     try {
       if (permanent) await api.permanentlyDeleteFile(file.id);
-      else await api.deleteFile(file.id);
+      else await api.deleteFile(file.id, keepShares);
       setSelected(null);
       invalidateWorkspace();
       show(permanent ? "文件已彻底删除" : "文件已移入回收站");
@@ -587,9 +648,9 @@ function SharesView({ shares, loading, error, onCopy, onRevoke }: { shares: Shar
     }
   }
 
-  return <section className="share-surface"><div className="share-intro"><div><p className="eyebrow">EXTERNAL ACCESS</p><h2>分享链接</h2><p>从文件详情创建链接。链接可设置过期时间和下载次数。</p></div><Share2 size={28} /></div><div className="share-table"><div className="share-row share-row-head"><span>令牌</span><span>下载次数</span><span>过期时间</span><span /></div>{loading && <LoadingRows />}{Boolean(error) && <div className="empty-state error-state"><p>无法加载分享链接</p><span>{messageOf(error)}</span></div>}{!loading && !error && shares.length === 0 && <div className="empty-state"><Share2 size={28} /><p>还没有有效的分享链接</p><span>在文件详情中点击“分享”即可创建。</span></div>}{shares.map((share) => {
+  return <section className="share-surface"><div className="share-intro"><div><p className="eyebrow">EXTERNAL ACCESS</p><h2>分享链接</h2><p>从文件详情创建链接。默认有效期为 7 天，可设置密码和下载次数。</p></div><Share2 size={28} /></div><div className="share-table"><div className="share-row share-row-head"><span>分享文件</span><span>下载次数</span><span>过期时间</span><span /></div>{loading && <LoadingRows />}{Boolean(error) && <div className="empty-state error-state"><p>无法加载分享链接</p><span>{messageOf(error)}</span></div>}{!loading && !error && shares.length === 0 && <div className="empty-state"><Share2 size={28} /><p>还没有有效的分享链接</p><span>在文件详情中点击“分享”即可创建。</span></div>}{shares.map((share) => {
     const copied = copiedToken === share.token;
-    return <div className="share-row" key={share.token}><span className="share-token"><code>{share.token}</code><button type="button" className={copied ? "share-copy copied" : "share-copy"} title={copied ? "令牌已复制" : "复制公开链接"} aria-label={copied ? "令牌已复制" : "复制公开链接"} onClick={() => void copyShareLink(share.token)}>{copied ? <Check size={15} /> : <Link size={15} />}</button>{copied && <span className="copy-status" role="status">已复制</span>}</span><span>{share.download_count}{share.max_downloads ? ` / ${share.max_downloads}` : ""}</span><span>{share.expires_at ? formatDate(share.expires_at) : "永久有效"}</span><span><IconAction label="撤销分享" tone="danger" onClick={() => onRevoke(share)}><Trash2 size={16} /></IconAction></span></div>;
+    return <div className="share-row" key={share.token}><span className="share-file-summary"><FileKindIcon file={{ id: 0, user_id: 0, parent_id: null, original_name: share.original_name, storage_path: "", size: share.size, content_type: share.content_type, status: "active", created_at: share.created_at }} /><span><strong>{share.original_name}</strong><small>{formatBytes(share.size)} · {shortType(share.content_type)}</small></span><span className="share-token"><button type="button" className={copied ? "share-copy copied" : "share-copy"} title={copied ? "链接已复制" : "复制公开链接"} aria-label={copied ? "链接已复制" : "复制公开链接"} onClick={() => void copyShareLink(share.token)}>{copied ? <Check size={15} /> : <Link size={15} />}</button>{copied && <span className="copy-status" role="status">已复制</span>}</span></span><span>{share.download_count}{share.max_downloads ? ` / ${share.max_downloads}` : ""}</span><span>{share.expires_at ? formatDate(share.expires_at) : "7 天后过期"}</span><span><IconAction label="撤销分享" tone="danger" onClick={() => onRevoke(share)}><Trash2 size={16} /></IconAction></span></div>;
   })}</div></section>;
 }
 
@@ -623,7 +684,7 @@ function ShareDialog({ file, onClose, onSubmit }: { file: UserFile; onClose: () 
   const [password, setPassword] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [maxDownloads, setMaxDownloads] = useState("");
-  return <Dialog title="创建分享链接" onClose={onClose}><form className="dialog-form" onSubmit={(event) => { event.preventDefault(); onSubmit({ password: password || undefined, expires_at: expiresAt ? new Date(expiresAt).toISOString() : undefined, max_downloads: maxDownloads ? Number(maxDownloads) : undefined }); }}><p className="dialog-subtitle">为“{file.original_name}”创建一个可控下载链接。</p><label>访问密码 <span className="optional">可选</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="留空则无需密码" /></label><label>过期时间 <span className="optional">可选</span><input value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} type="datetime-local" /></label><label>最大下载次数 <span className="optional">可选</span><input value={maxDownloads} onChange={(event) => setMaxDownloads(event.target.value)} type="number" min="1" placeholder="留空则不限次数" /></label><DialogActions onClose={onClose} submit="创建并复制链接" /></form></Dialog>;
+  return <Dialog title="创建分享链接" onClose={onClose}><form className="dialog-form" onSubmit={(event) => { event.preventDefault(); onSubmit({ password: password || undefined, expires_at: expiresAt ? new Date(expiresAt).toISOString() : undefined, max_downloads: maxDownloads ? Number(maxDownloads) : undefined }); }}><p className="dialog-subtitle">为“{file.original_name}”创建受控分享链接。默认 7 天后过期，下载次数不限。</p><label>访问密码 <span className="optional">可选</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="留空则无需密码" /></label><label>过期时间 <span className="optional">高级设置</span><input value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} type="datetime-local" /></label><label>最大下载次数 <span className="optional">高级设置</span><input value={maxDownloads} onChange={(event) => setMaxDownloads(event.target.value)} type="number" min="1" placeholder="留空则不限次数" /></label><DialogActions onClose={onClose} submit="创建并复制链接" /></form></Dialog>;
 }
 
 function SaveShareDialog({ folders, onClose, onSubmit }: { folders: FolderType[]; onClose: () => void; onSubmit: (data: { token: string; password: string; parent_id: number | null }) => void }) {

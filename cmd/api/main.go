@@ -295,7 +295,8 @@ func main() {
 		}
 	}()
 
-	api.GET("/shares/:token/download", shareHandler.Download)
+	api.GET("/shares/:token", shareHandler.PublicInfo)
+	api.GET("/shares/:token/preview", shareHandler.PublicPreview)
 
 	protected := api.Group("")
 	protected.Use(middleware.Auth(cfg.JWTSecret))
@@ -337,6 +338,7 @@ func main() {
 	protected.GET("/storage", fileHandler.GetStorageUsage)
 	protected.POST("/files/:id/shares", shareHandler.Create)
 	protected.POST("/shares/:token/save", shareHandler.Save)
+	protected.GET("/shares/:token/download", shareHandler.Download)
 	protected.GET("/shares", shareHandler.List)
 	protected.DELETE("/shares/:token", shareHandler.Revoke)
 	protected.GET("/jobs/:id", jobHTTPHandler.Get)
