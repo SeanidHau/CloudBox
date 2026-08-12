@@ -1,0 +1,681 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Archive,
+  ArrowLeft,
+  Check,
+  ChevronRight,
+  CircleHelp,
+  Cloud,
+  Download,
+  File,
+  FileArchive,
+  FileImage,
+  FileText,
+  FileVideo,
+  Folder,
+  FolderOpen,
+  FolderPlus,
+  HardDrive,
+  ImageOff,
+  LayoutGrid,
+  Link,
+  LoaderCircle,
+  LogOut,
+  MoreHorizontal,
+  MoveRight,
+  Pencil,
+  Plus,
+  Search,
+  Settings,
+  ShieldCheck,
+  Share2,
+  Trash2,
+  Upload,
+  X
+} from "lucide-react";
+import {
+  type ChangeEvent,
+  type DragEvent,
+  type FormEvent,
+  type ReactNode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { api, ApiError } from "./api/client";
+import type { Folder as FolderType, Session, Share, StorageUsage, UserFile } from "./api/types";
+import { clearSession, readSession, writeSession } from "./auth/session";
+
+type Toast = { message: string; tone: "success" | "error" | "info" } | null;
+type SelectedItem =
+  | { type: "file"; value: UserFile }
+  | { type: "folder"; value: FolderType }
+  | null;
+type UploadItem = { id: string; name: string; progress: number; state: "uploading" | "finished" | "failed" };
+type DirectoryEntry =
+  | { type: "file"; value: UserFile }
+  | { type: "folder"; value: FolderType };
+
+export default function App() {
+  const [session, setSession] = useState<Session | null>(() => readSession());
+
+  useEffect(() => {
+    const onUnauthorized = () => setSession(null);
+    window.addEventListener("cloudbox:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("cloudbox:unauthorized", onUnauthorized);
+  }, []);
+
+  return (
+    <Routes>
+      <Route path="/share/:token" element={<PublicSharePage />} />
+      <Route path="/login" element={session ? <Navigate to="/files" replace /> : <LoginPage onAuthenticated={setSession} />} />
+      <Route path="*" element={session ? <Workspace session={session} onLogout={() => setSession(null)} /> : <Navigate to="/login" replace />} />
+    </Routes>
+  );
+}
+
+function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) => void }) {
+  const navigate = useNavigate();
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setSubmitting(true);
+    try {
+      if (mode === "register") {
+        await api.register(username, password);
+      }
+      const { token } = await api.login(username, password);
+      const next = { token, username };
+      writeSession(next);
+      onAuthenticated(next);
+      navigate("/files", { replace: true });
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="auth-intro" aria-label="CloudBox 介绍">
+        <div className="brand-mark brand-mark-large"><Cloud size={28} strokeWidth={2.4} /></div>
+        <p className="eyebrow">CLOUDBOX WORKSPACE</p>
+        <h1>管理每一份<br />重要文件。</h1>
+        <p className="auth-copy">上传、整理、共享与安全扫描都在一个安静、清晰的工作台中完成。</p>
+        <div className="auth-features">
+          <span><ShieldCheck size={16} /> 异步安全扫描</span>
+          <span><HardDrive size={16} /> 容量配额可见</span>
+          <span><Share2 size={16} /> 可控外链分享</span>
+        </div>
+      </section>
+      <section className="auth-form-area">
+        <form className="auth-form" onSubmit={submit}>
+          <div className="auth-heading">
+            <div className="brand-inline"><span className="brand-mark"><Cloud size={18} /></span> CloudBox</div>
+            <h2>{mode === "login" ? "欢迎回来" : "创建工作区账号"}</h2>
+            <p>{mode === "login" ? "使用你的账号进入文件工作台。" : "注册后会自动登录到文件工作台。"}</p>
+          </div>
+          <label>
+            用户名
+            <input value={username} onChange={(event) => setUsername(event.target.value)} placeholder="输入用户名" autoComplete="username" required />
+          </label>
+          <label>
+            密码
+            <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 6 位字符" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} required />
+          </label>
+          {error && <p className="form-error">{error}</p>}
+          <button className="primary-button auth-submit" type="submit" disabled={submitting}>
+            {submitting && <LoaderCircle size={17} className="spin" />}
+            {mode === "login" ? "登录" : "创建账号"}
+          </button>
+          <button className="text-button auth-switch" type="button" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>
+            {mode === "login" ? "没有账号？注册一个" : "已有账号？返回登录"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function PublicSharePage() {
+  const { token = "" } = useParams();
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [downloading, setDownloading] = useState(false);
+
+  async function download(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setDownloading(true);
+    try {
+      // 密码只在本次下载请求中作为请求头发送，不会保存到浏览器存储。
+      await api.downloadShared(token, password);
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  return (
+    <main className="public-share-page">
+      <header className="public-share-header">
+        <div className="brand-inline"><span className="brand-mark"><Cloud size={18} /></span>CloudBox</div>
+      </header>
+      <section className="public-share-card" aria-label="共享文件下载">
+        <div className="public-share-icon"><Share2 size={28} /></div>
+        <p className="eyebrow">SHARED FILE</p>
+        <h1>有人向你分享了一个文件</h1>
+        <p className="public-share-copy">该链接无需登录。若分享者设置了访问密码，请输入后开始下载。</p>
+        <form className="public-share-form" onSubmit={download}>
+          <label>
+            访问密码 <span className="optional">如有</span>
+            <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="未设置密码则留空" autoComplete="current-password" />
+          </label>
+          {error && <p className="form-error">{error}</p>}
+          <button className="primary-button public-share-download" type="submit" disabled={downloading || !token}>
+            {downloading ? <LoaderCircle size={17} className="spin" /> : <Download size={17} />}
+            {downloading ? "正在准备下载" : "下载文件"}
+          </button>
+        </form>
+        <p className="public-share-note"><ShieldCheck size={15} />下载受分享者设置的过期时间和下载次数限制。</p>
+      </section>
+    </main>
+  );
+}
+
+function Workspace({ session, onLogout }: { session: Session; onLogout: () => void }) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [selected, setSelected] = useState<SelectedItem>(null);
+  const [search, setSearch] = useState("");
+  const [toast, setToast] = useState<Toast>(null);
+  const [dialog, setDialog] = useState<"upload" | "folder" | "rename" | "move" | "share" | "save-share" | null>(null);
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement>(null);
+
+  const view = location.pathname === "/trash" ? "trash" : location.pathname === "/shares" ? "shares" : location.pathname === "/settings" ? "settings" : "files";
+  const folderPath = readFolderPath(searchParams.get("path"), toID(searchParams.get("folder")));
+  const folderNames = readFolderNames(searchParams.get("names"), folderPath.length);
+  const parentID = folderPath.at(-1) ?? null;
+  const filesQuery = useQuery({
+    queryKey: ["files", parentID],
+    queryFn: () => api.listFiles(parentID),
+    enabled: view === "files"
+  });
+  const trashQuery = useQuery({ queryKey: ["trash"], queryFn: api.listTrash, enabled: view === "trash" });
+  const foldersQuery = useQuery({
+    queryKey: ["folders", parentID],
+    queryFn: () => api.listFolders(parentID),
+    enabled: view === "files"
+  });
+  const rootFoldersQuery = useQuery({ queryKey: ["folders", null], queryFn: () => api.listFolders(null) });
+  const storageQuery = useQuery({ queryKey: ["storage"], queryFn: api.storage });
+  const sharesQuery = useQuery({ queryKey: ["shares"], queryFn: api.listShares, enabled: view === "shares" });
+
+  useEffect(() => setSelected(null), [location.pathname, parentID]);
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timer = window.setTimeout(() => setToast(null), 4200);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+  useEffect(() => {
+    function closeTransientUI(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      setHelpOpen(false);
+      setAccountMenuOpen(false);
+    }
+
+    window.addEventListener("keydown", closeTransientUI);
+    return () => window.removeEventListener("keydown", closeTransientUI);
+  }, []);
+  useEffect(() => {
+    if (!accountMenuOpen) return undefined;
+
+    function closeAccountMenu(event: MouseEvent) {
+      if (!accountMenuRef.current?.contains(event.target as Node)) {
+        setAccountMenuOpen(false);
+      }
+    }
+
+    window.addEventListener("mousedown", closeAccountMenu);
+    return () => window.removeEventListener("mousedown", closeAccountMenu);
+  }, [accountMenuOpen]);
+
+  const files = view === "trash" ? trashQuery.data?.files ?? [] : filesQuery.data?.files ?? [];
+  const folders = foldersQuery.data?.folders ?? [];
+  const filteredFiles = useMemo(() => {
+    const normalized = search.trim().toLowerCase();
+    return normalized ? files.filter((item) => item.original_name.toLowerCase().includes(normalized)) : files;
+  }, [files, search]);
+  const filteredFolders = useMemo(() => {
+    const normalized = search.trim().toLowerCase();
+    return normalized ? folders.filter((item) => item.name.toLowerCase().includes(normalized)) : folders;
+  }, [folders, search]);
+  const entries = useMemo<DirectoryEntry[]>(() => [
+    ...filteredFolders.map((value) => ({ type: "folder" as const, value })),
+    ...filteredFiles.map((value) => ({ type: "file" as const, value }))
+  ], [filteredFiles, filteredFolders]);
+  const isLoading = (view === "files" && (filesQuery.isLoading || foldersQuery.isLoading)) || (view === "trash" && trashQuery.isLoading) || (view === "shares" && sharesQuery.isLoading);
+  const loadError = view === "files" ? filesQuery.error ?? foldersQuery.error : view === "trash" ? trashQuery.error : sharesQuery.error;
+
+  function invalidateWorkspace() {
+    void queryClient.invalidateQueries({ queryKey: ["files"] });
+    void queryClient.invalidateQueries({ queryKey: ["folders"] });
+    void queryClient.invalidateQueries({ queryKey: ["trash"] });
+    void queryClient.invalidateQueries({ queryKey: ["storage"] });
+    void queryClient.invalidateQueries({ queryKey: ["shares"] });
+  }
+
+  function show(message: string, tone: NonNullable<Toast>["tone"] = "success") {
+    setToast({ message, tone });
+  }
+
+  async function handleUpload(fileList: FileList | File[]) {
+    const queue = Array.from(fileList);
+    if (queue.length === 0) return;
+    setDialog(null);
+    setDragging(false);
+    for (const file of queue) {
+      const id = `${file.name}-${file.lastModified}-${crypto.randomUUID()}`;
+      setUploads((items) => [...items, { id, name: file.name, progress: 0, state: "uploading" }]);
+      try {
+        await api.uploadFile(file, parentID, (progress) => {
+          setUploads((items) => items.map((item) => item.id === id ? { ...item, progress } : item));
+        });
+        setUploads((items) => items.map((item) => item.id === id ? { ...item, progress: 100, state: "finished" } : item));
+        window.setTimeout(() => setUploads((items) => items.filter((item) => item.id !== id)), 2600);
+      } catch (err) {
+        setUploads((items) => items.map((item) => item.id === id ? { ...item, state: "failed" } : item));
+        show(`${file.name} 上传失败：${messageOf(err)}`, "error");
+      }
+    }
+    invalidateWorkspace();
+  }
+
+  async function removeFile(file: UserFile, permanent = false) {
+    if (!window.confirm(permanent ? `彻底删除“${file.original_name}”？该操作不可恢复。` : `将“${file.original_name}”移入回收站？`)) return;
+    try {
+      if (permanent) await api.permanentlyDeleteFile(file.id);
+      else await api.deleteFile(file.id);
+      setSelected(null);
+      invalidateWorkspace();
+      show(permanent ? "文件已彻底删除" : "文件已移入回收站");
+    } catch (err) {
+      show(messageOf(err), "error");
+    }
+  }
+
+  async function restoreFile(file: UserFile) {
+    try {
+      await api.restoreFile(file.id);
+      setSelected(null);
+      invalidateWorkspace();
+      show("文件已恢复到原目录");
+    } catch (err) {
+      show(messageOf(err), "error");
+    }
+  }
+
+  async function removeFolder(folder: FolderType) {
+    if (!window.confirm(`删除空文件夹“${folder.name}”？`)) return;
+    try {
+      await api.deleteFolder(folder.id);
+      setSelected(null);
+      invalidateWorkspace();
+      show("文件夹已删除");
+    } catch (err) {
+      show(messageOf(err), "error");
+    }
+  }
+
+  async function downloadFile(file: UserFile) {
+    try {
+      await api.download(file.id);
+    } catch (err) {
+      const apiError = err instanceof ApiError ? err : null;
+      const hint = apiError?.status === 423 ? "文件正在等待安全扫描完成，暂时不可下载。" : apiError?.status === 403 ? "该文件未通过安全扫描，无法下载。" : messageOf(err);
+      show(hint, "error");
+    }
+  }
+
+  function openFolder(folder: FolderType) {
+    setSearch("");
+    setFolderPath([...folderPath, folder.id], [...folderNames, folder.name]);
+  }
+
+  function setFolderPath(nextPath: number[], nextNames: string[] = []) {
+    if (nextPath.length === 0) {
+      setSearchParams({});
+      return;
+    }
+
+    setSearchParams({
+      folder: String(nextPath.at(-1)),
+      path: nextPath.join(","),
+      names: nextNames.join(",")
+    });
+  }
+
+  function goUp() {
+    setSearch("");
+    setFolderPath(folderPath.slice(0, -1), folderNames.slice(0, -1));
+  }
+
+  function goToPath(index: number) {
+    setSearch("");
+    setFolderPath(folderPath.slice(0, index + 1), folderNames.slice(0, index + 1));
+  }
+
+  function logout() {
+    setAccountMenuOpen(false);
+    clearSession();
+    onLogout();
+    navigate("/login", { replace: true });
+  }
+
+  const currentTitle = view === "trash" ? "回收站" : view === "shares" ? "分享链接" : view === "settings" ? "设置" : parentID ? folderNames.at(-1) || "当前文件夹" : "我的文件";
+
+  return (
+    <div className="workspace-shell">
+      <aside className="sidebar">
+        <div className="sidebar-brand"><img className="brand-image" src="/cloudbox-icon.png" alt="CloudBox" /><strong>CloudBox</strong></div>
+        <nav className="side-nav" aria-label="主导航">
+          <NavLink to="/files" title="我的文件" className={({ isActive }) => navClass(isActive && view === "files")}><LayoutGrid size={18} />我的文件</NavLink>
+          <NavLink to="/shares" title="分享链接" className={({ isActive }) => navClass(isActive)}><Share2 size={18} />分享链接</NavLink>
+          <NavLink to="/trash" title="回收站" className={({ isActive }) => navClass(isActive)}><Trash2 size={18} />回收站</NavLink>
+        </nav>
+        <div className="sidebar-storage">
+          <div className="storage-label"><span>存储空间</span><HardDrive size={15} /></div>
+          <div className="meter"><span style={{ width: `${usagePercent(storageQuery.data)}%` }} /></div>
+          <p>{formatBytes(storageQuery.data?.used_bytes ?? 0)} / {formatBytes(storageQuery.data?.quota_bytes ?? 0)}</p>
+        </div>
+        <div className="sidebar-bottom">
+          <NavLink to="/settings" title="设置" className={({ isActive }) => navClass(isActive)}><Settings size={18} />设置</NavLink>
+          <button className="side-action" type="button" title="退出登录" onClick={logout}><LogOut size={18} />退出登录</button>
+        </div>
+      </aside>
+
+      <main className="workspace-main">
+        <header className="topbar">
+          <div className="breadcrumb">
+            {view === "files" ? <>
+              <button type="button" className="breadcrumb-root" onClick={() => { setFolderPath([]); setSearch(""); }}>我的文件</button>
+              {folderPath.map((id, index) => <span className="breadcrumb-item" key={id}><ChevronRight size={16} />{index === folderPath.length - 1 ? <span>{folderNames[index] || "当前文件夹"}</span> : <button type="button" className="breadcrumb-root" onClick={() => goToPath(index)}>{folderNames[index] || "当前文件夹"}</button>}</span>)}
+            </> : <span className="topbar-context">{currentTitle}</span>}
+          </div>
+          <div className="topbar-actions">
+            {view === "files" && <label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索当前目录" /></label>}
+            <button type="button" className="icon-button" title="帮助" aria-label="打开帮助" aria-expanded={helpOpen} onClick={() => { setHelpOpen(true); setAccountMenuOpen(false); }}><CircleHelp size={19} /></button>
+            <div className="account-menu-wrap" ref={accountMenuRef}>
+              <button type="button" className="user-button" title={`当前用户：${session.username}`} aria-label="打开账户菜单" aria-expanded={accountMenuOpen} onClick={() => { setAccountMenuOpen((open) => !open); setHelpOpen(false); }}><span>{session.username.slice(0, 1).toUpperCase()}</span></button>
+              {accountMenuOpen && <div className="account-menu" role="menu" aria-label="账户菜单">
+                <div className="account-menu-identity"><strong>{session.username}</strong><span>当前登录账号</span></div>
+                <button type="button" role="menuitem" onClick={() => { setAccountMenuOpen(false); navigate("/settings"); }}><Settings size={16} />账户设置</button>
+                <button type="button" role="menuitem" className="account-menu-logout" onClick={logout}><LogOut size={16} />退出登录</button>
+              </div>}
+            </div>
+          </div>
+        </header>
+
+        <section className="content-area">
+          <div className="page-heading">
+            <div><p className="eyebrow">WORKSPACE</p>{view === "files" && parentID && <button type="button" className="back-button" onClick={goUp}><ArrowLeft size={16} />返回上一级</button>}<h1>{currentTitle}</h1></div>
+            {view === "files" && <div className="heading-actions">
+              <button type="button" className="secondary-button" onClick={() => setDialog("folder")}><FolderPlus size={17} />新建文件夹</button>
+              <button type="button" className="primary-button" onClick={() => setDialog("upload")}><Upload size={17} />上传文件</button>
+            </div>}
+            {view === "shares" && <div className="heading-actions">
+              <button type="button" className="primary-button" onClick={() => setDialog("save-share")}><Download size={17} />保存分享文件</button>
+            </div>}
+          </div>
+
+          {view === "settings" ? (
+            <SettingsView session={session} usage={storageQuery.data} />
+          ) : view === "shares" ? (
+            <SharesView shares={sharesQuery.data?.shares ?? []} loading={isLoading} error={loadError} onCopy={() => show("分享链接已复制到剪贴板")} onRevoke={async (share) => {
+              if (!window.confirm("撤销该分享链接？")) return;
+              try { await api.revokeShare(share.token); invalidateWorkspace(); show("分享链接已撤销"); } catch (err) { show(messageOf(err), "error"); }
+            }} />
+          ) : (
+            <div className={`file-layout ${selected ? "details-open" : ""}`}>
+              <section className="file-surface" onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); void handleUpload(event.dataTransfer.files); }}>
+                {dragging && <div className="drop-overlay"><Upload size={24} /><strong>释放以上传到当前目录</strong><span>文件会先完成后端安全扫描</span></div>}
+                <div className="file-table-wrap">
+                  <div className="section-label">{view === "trash" ? "已删除文件" : "目录内容"} <span>{view === "trash" ? filteredFiles.length : entries.length}</span></div>
+                  <div className="file-table">
+                    <div className="file-row file-row-head"><span>名称</span><span>大小</span><span>类型</span><span>创建时间</span><span /></div>
+                    {isLoading && <LoadingRows />}
+                    {loadError && <div className="empty-state error-state"><p>无法加载内容</p><span>{messageOf(loadError)}</span></div>}
+                    {!isLoading && !loadError && (view === "trash" ? filteredFiles.length : entries.length) === 0 && <EmptyFiles trash={view === "trash"} searching={Boolean(search)} />}
+                    {view === "trash" ? filteredFiles.map((file) => <FileRow key={file.id} file={file} selected={selected?.type === "file" && selected.value.id === file.id} trash onSelect={() => setSelected({ type: "file", value: file })} onDownload={() => void downloadFile(file)} onDelete={() => void removeFile(file, true)} onRestore={() => void restoreFile(file)} />) : entries.map((entry) => <DirectoryEntryRow key={`${entry.type}-${entry.value.id}`} entry={entry} selected={selected?.type === entry.type && selected.value.id === entry.value.id} onSelect={() => setSelected(entry)} onOpenFolder={() => entry.type === "folder" && openFolder(entry.value)} onDownload={() => entry.type === "file" && void downloadFile(entry.value)} onDelete={() => entry.type === "file" && void removeFile(entry.value)} />)}
+                  </div>
+                </div>
+              </section>
+              {selected && <DetailPanel selected={selected} trash={view === "trash"} onClose={() => setSelected(null)} onDownload={() => selected.type === "file" && void downloadFile(selected.value)} onDelete={() => selected.type === "file" ? void removeFile(selected.value, view === "trash") : void removeFolder(selected.value)} onRestore={() => selected.type === "file" && void restoreFile(selected.value)} onRename={() => setDialog("rename")} onMove={() => setDialog("move")} onShare={() => setDialog("share")} onVerify={async () => {
+                if (selected.type !== "file") return;
+                try { await api.enqueueVerification(selected.value.id); show("已加入文件完整性校验队列", "info"); } catch (err) { show(messageOf(err), "error"); }
+              }} />}
+            </div>
+          )}
+        </section>
+      </main>
+
+      {uploads.length > 0 && <UploadQueue items={uploads} />}
+      {toast && <div className={`toast toast-${toast.tone}`}>{toast.tone === "success" ? <ShieldCheck size={17} /> : <CircleHelp size={17} />}<span>{toast.message}</span><button type="button" aria-label="关闭提示" onClick={() => setToast(null)}><X size={15} /></button></div>}
+      {dialog === "upload" && <UploadDialog onClose={() => setDialog(null)} onUpload={handleUpload} />}
+      {dialog === "folder" && <FolderDialog onClose={() => setDialog(null)} onSubmit={async (name) => {
+        try { await api.createFolder(name, parentID); invalidateWorkspace(); setDialog(null); show("文件夹已创建"); } catch (err) { show(messageOf(err), "error"); }
+      }} />}
+      {dialog === "rename" && selected && <RenameDialog selected={selected} onClose={() => setDialog(null)} onSubmit={async (name) => {
+        try {
+          if (selected.type === "file") await api.renameFile(selected.value.id, name);
+          else await api.renameFolder(selected.value.id, name);
+          invalidateWorkspace(); setDialog(null); show("名称已更新");
+        } catch (err) { show(messageOf(err), "error"); }
+      }} />}
+      {dialog === "move" && selected && <MoveDialog selected={selected} folders={rootFoldersQuery.data?.folders ?? []} currentParentID={parentID} onClose={() => setDialog(null)} onSubmit={async (target) => {
+        try {
+          if (selected.type === "file") await api.moveFile(selected.value.id, target);
+          else await api.moveFolder(selected.value.id, target);
+          invalidateWorkspace(); setDialog(null); show("已移动到目标目录");
+        } catch (err) { show(messageOf(err), "error"); }
+      }} />}
+      {dialog === "share" && selected?.type === "file" && <ShareDialog file={selected.value} onClose={() => setDialog(null)} onSubmit={async (data) => {
+        try {
+          const { share } = await api.createShare(selected.value.id, data);
+          await navigator.clipboard.writeText(publicShareURL(share.token));
+          invalidateWorkspace(); setDialog(null); show("分享链接已创建并复制到剪贴板");
+        } catch (err) { show(messageOf(err), "error"); }
+      }} />}
+      {dialog === "save-share" && <SaveShareDialog folders={rootFoldersQuery.data?.folders ?? []} onClose={() => setDialog(null)} onSubmit={async (data) => {
+        try {
+          const { file } = await api.saveSharedFile(data.token, data.password, data.parent_id);
+          invalidateWorkspace();
+          setDialog(null);
+          show(`“${file.original_name}”已保存到我的文件`);
+        } catch (err) { show(messageOf(err), "error"); }
+      }} />}
+      {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
+    </div>
+  );
+}
+
+function FileRow({ file, selected, trash, onSelect, onDownload, onDelete, onRestore }: { file: UserFile; selected: boolean; trash: boolean; onSelect: () => void; onDownload: () => void; onDelete: () => void; onRestore: () => void }) {
+  return <div className={`file-row ${selected ? "selected" : ""}`} onClick={onSelect} onDoubleClick={onDownload}>
+    <span className="file-name"><FileKindIcon file={file} /><strong>{file.original_name}</strong></span>
+    <span>{formatBytes(file.size)}</span><span className="file-type">{shortType(file.content_type)}</span><span>{formatDate(file.created_at)}</span>
+    <span className="row-actions" onClick={(event) => event.stopPropagation()}>
+      {trash ? <><IconAction label="恢复" onClick={onRestore}><Archive size={16} /></IconAction><IconAction label="彻底删除" tone="danger" onClick={onDelete}><Trash2 size={16} /></IconAction></> : <><IconAction label="下载" onClick={onDownload}><Download size={16} /></IconAction><IconAction label="移入回收站" tone="danger" onClick={onDelete}><Trash2 size={16} /></IconAction></>}
+    </span>
+  </div>;
+}
+
+function DirectoryEntryRow({ entry, selected, onSelect, onOpenFolder, onDownload, onDelete }: { entry: DirectoryEntry; selected: boolean; onSelect: () => void; onOpenFolder: () => void; onDownload: () => void; onDelete: () => void }) {
+  const isFolder = entry.type === "folder";
+  const name = isFolder ? entry.value.name : entry.value.original_name;
+  const createdAt = isFolder ? entry.value.created_at : entry.value.created_at;
+
+  return <div className={`file-row ${selected ? "selected" : ""} ${isFolder ? "folder-row" : ""}`} onClick={onSelect} onDoubleClick={isFolder ? onOpenFolder : onDownload}>
+    <span className="file-name">{isFolder ? <FolderOpen size={20} className="kind-folder" fill="currentColor" /> : <FileKindIcon file={entry.value} />}<strong>{name}</strong></span>
+    <span>{formatBytes(entry.value.size)}</span>
+    <span className="file-type">{isFolder ? "文件夹" : shortType(entry.value.content_type)}</span>
+    <span>{formatDate(createdAt)}</span>
+    <span className="row-actions" onClick={(event) => event.stopPropagation()}>
+      {isFolder ? <IconAction label="打开文件夹" onClick={onOpenFolder}><ChevronRight size={17} /></IconAction> : <><IconAction label="下载" onClick={onDownload}><Download size={16} /></IconAction><IconAction label="移入回收站" tone="danger" onClick={onDelete}><Trash2 size={16} /></IconAction></>}
+    </span>
+  </div>;
+}
+
+function DetailPanel({ selected, trash, onClose, onDownload, onDelete, onRestore, onRename, onMove, onShare, onVerify }: { selected: Exclude<SelectedItem, null>; trash: boolean; onClose: () => void; onDownload: () => void; onDelete: () => void; onRestore: () => void; onRename: () => void; onMove: () => void; onShare: () => void; onVerify: () => void }) {
+  const file = selected.type === "file" ? selected.value : null;
+  const [preview, setPreview] = useState<string | null>(null);
+  useEffect(() => {
+    if (!file?.content_type.startsWith("image/")) { setPreview(null); return undefined; }
+    let objectURL: string | null = null;
+    void api.thumbnail(file.id).then((blob) => { objectURL = URL.createObjectURL(blob); setPreview(objectURL); }).catch(() => setPreview(null));
+    return () => { if (objectURL) URL.revokeObjectURL(objectURL); };
+  }, [file?.id, file?.content_type]);
+
+  const name = selected.type === "file" ? selected.value.original_name : selected.value.name;
+  return <aside className="detail-panel">
+    <div className="detail-top"><span>详细信息</span><button className="icon-button" type="button" onClick={onClose} aria-label="关闭详情" title="关闭详情"><X size={18} /></button></div>
+    <div className="preview-box">{file && preview ? <img src={preview} alt={`${name} 缩略图`} /> : file ? <FileKindIcon file={file} size={54} /> : <Folder size={56} fill="currentColor" />}{file?.content_type.startsWith("image/") && !preview && <span className="preview-unavailable"><ImageOff size={16} />暂无预览</span>}</div>
+    <div className="detail-name"><strong>{name}</strong><span>{file ? shortType(file.content_type) : "文件夹"}</span></div>
+    <div className="detail-actions">
+      {file && !trash && <><button className="primary-button compact" type="button" onClick={onDownload}><Download size={16} />下载</button><button className="secondary-button compact" type="button" onClick={onShare}><Link size={16} />分享</button></>}
+      {file && trash && <button className="primary-button compact" type="button" onClick={onRestore}><Archive size={16} />恢复文件</button>}
+      {!trash && <><button className="icon-action-wide" type="button" onClick={onRename}><Pencil size={16} />重命名</button><button className="icon-action-wide" type="button" onClick={onMove}><MoveRight size={16} />移动到</button>{file && <button className="icon-action-wide" type="button" onClick={onVerify}><ShieldCheck size={16} />发起完整性校验</button>}</>}
+      <button className="icon-action-wide danger" type="button" onClick={onDelete}><Trash2 size={16} />{trash ? "彻底删除" : "移入回收站"}</button>
+    </div>
+    <dl className="metadata-list">
+      <div><dt>类型</dt><dd>{file ? file.content_type || "未知" : "文件夹"}</dd></div>
+      <div><dt>大小</dt><dd>{formatBytes(file ? file.size : selected.value.size)}</dd></div>
+      <div><dt>创建时间</dt><dd>{formatDate(selected.value.created_at)}</dd></div>
+      {file && <div><dt>状态</dt><dd><span className={file.status === "active" ? "status-active" : "status-deleted"}>{file.status === "active" ? "可用" : "已删除"}</span></dd></div>}
+    </dl>
+    {file && <p className="scan-note"><ShieldCheck size={15} />下载与缩略图会受到后端安全扫描结果控制。</p>}
+  </aside>;
+}
+
+function SharesView({ shares, loading, error, onCopy, onRevoke }: { shares: Share[]; loading: boolean; error: unknown; onCopy: () => void; onRevoke: (share: Share) => void }) {
+  const [copiedToken, setCopiedToken] = useState<string | null>(null);
+
+  async function copyShareLink(token: string) {
+    try {
+      await navigator.clipboard.writeText(publicShareURL(token));
+      setCopiedToken(token);
+      onCopy();
+      window.setTimeout(() => setCopiedToken((current) => current === token ? null : current), 1800);
+    } catch {
+      // 剪贴板权限被拒绝时，使用已有的全局提示说明失败原因。
+      setCopiedToken(null);
+    }
+  }
+
+  return <section className="share-surface"><div className="share-intro"><div><p className="eyebrow">EXTERNAL ACCESS</p><h2>分享链接</h2><p>从文件详情创建链接。链接可设置过期时间和下载次数。</p></div><Share2 size={28} /></div><div className="share-table"><div className="share-row share-row-head"><span>令牌</span><span>下载次数</span><span>过期时间</span><span /></div>{loading && <LoadingRows />}{Boolean(error) && <div className="empty-state error-state"><p>无法加载分享链接</p><span>{messageOf(error)}</span></div>}{!loading && !error && shares.length === 0 && <div className="empty-state"><Share2 size={28} /><p>还没有有效的分享链接</p><span>在文件详情中点击“分享”即可创建。</span></div>}{shares.map((share) => {
+    const copied = copiedToken === share.token;
+    return <div className="share-row" key={share.token}><span className="share-token"><code>{share.token}</code><button type="button" className={copied ? "share-copy copied" : "share-copy"} title={copied ? "令牌已复制" : "复制公开链接"} aria-label={copied ? "令牌已复制" : "复制公开链接"} onClick={() => void copyShareLink(share.token)}>{copied ? <Check size={15} /> : <Link size={15} />}</button>{copied && <span className="copy-status" role="status">已复制</span>}</span><span>{share.download_count}{share.max_downloads ? ` / ${share.max_downloads}` : ""}</span><span>{share.expires_at ? formatDate(share.expires_at) : "永久有效"}</span><span><IconAction label="撤销分享" tone="danger" onClick={() => onRevoke(share)}><Trash2 size={16} /></IconAction></span></div>;
+  })}</div></section>;
+}
+
+function SettingsView({ session, usage }: { session: Session; usage: StorageUsage | undefined }) {
+  return <section className="settings-layout"><div className="settings-section"><p className="eyebrow">ACCOUNT</p><h2>账号与存储</h2><div className="setting-row"><div className="avatar-large">{session.username.slice(0, 1).toUpperCase()}</div><div><strong>{session.username}</strong><p>当前登录账号</p></div></div></div><div className="settings-section"><div className="setting-heading"><div><p className="eyebrow">STORAGE</p><h2>容量使用情况</h2></div><strong>{usagePercent(usage)}%</strong></div><div className="large-meter"><span style={{ width: `${usagePercent(usage)}%` }} /></div><div className="usage-numbers"><span>已使用 <strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></span><span>剩余 <strong>{formatBytes(usage?.available_bytes ?? 0)}</strong></span><span>总容量 <strong>{formatBytes(usage?.quota_bytes ?? 0)}</strong></span></div></div></section>;
+}
+
+function UploadDialog({ onClose, onUpload }: { onClose: () => void; onUpload: (files: FileList | File[]) => void }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [dropping, setDropping] = useState(false);
+  return <Dialog title="上传文件" onClose={onClose}><div className={`upload-dropzone ${dropping ? "is-dropping" : ""}`} onDragOver={(event) => { event.preventDefault(); setDropping(true); }} onDragLeave={() => setDropping(false)} onDrop={(event) => { event.preventDefault(); onUpload(event.dataTransfer.files); }}><Upload size={30} /><strong>拖入文件到这里</strong><span>大于 5 MB 的文件会自动使用分片上传。</span><button className="secondary-button" type="button" onClick={() => inputRef.current?.click()}>选择文件</button><input ref={inputRef} type="file" multiple hidden onChange={(event: ChangeEvent<HTMLInputElement>) => { if (event.target.files) onUpload(event.target.files); }} /></div></Dialog>;
+}
+
+function FolderDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (name: string) => void }) {
+  const [name, setName] = useState("");
+  return <Dialog title="新建文件夹" onClose={onClose}><form className="dialog-form" onSubmit={(event) => { event.preventDefault(); onSubmit(name); }}><label>文件夹名称<input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：项目资料" required /></label><DialogActions onClose={onClose} submit="创建文件夹" /></form></Dialog>;
+}
+
+function RenameDialog({ selected, onClose, onSubmit }: { selected: Exclude<SelectedItem, null>; onClose: () => void; onSubmit: (name: string) => void }) {
+  const [name, setName] = useState(selected.type === "file" ? selected.value.original_name : selected.value.name);
+  return <Dialog title="重命名" onClose={onClose}><form className="dialog-form" onSubmit={(event) => { event.preventDefault(); onSubmit(name); }}><label>新名称<input autoFocus value={name} onChange={(event) => setName(event.target.value)} required /></label><DialogActions onClose={onClose} submit="保存修改" /></form></Dialog>;
+}
+
+function MoveDialog({ selected, folders, currentParentID, onClose, onSubmit }: { selected: Exclude<SelectedItem, null>; folders: FolderType[]; currentParentID: number | null; onClose: () => void; onSubmit: (target: number | null) => void }) {
+  const [target, setTarget] = useState<number | null>(currentParentID);
+  const choices = folders.filter((folder) => selected.type !== "folder" || folder.id !== selected.value.id);
+  return <Dialog title="移动到" onClose={onClose}><form className="dialog-form" onSubmit={(event) => { event.preventDefault(); onSubmit(target); }}><label>目标目录<select value={target ?? "root"} onChange={(event) => setTarget(event.target.value === "root" ? null : Number(event.target.value))}><option value="root">我的文件（根目录）</option>{choices.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label><p className="field-hint">当前版本可选择根目录或顶层文件夹。</p><DialogActions onClose={onClose} submit="移动" /></form></Dialog>;
+}
+
+function ShareDialog({ file, onClose, onSubmit }: { file: UserFile; onClose: () => void; onSubmit: (data: { password?: string; expires_at?: string; max_downloads?: number }) => void }) {
+  const [password, setPassword] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [maxDownloads, setMaxDownloads] = useState("");
+  return <Dialog title="创建分享链接" onClose={onClose}><form className="dialog-form" onSubmit={(event) => { event.preventDefault(); onSubmit({ password: password || undefined, expires_at: expiresAt ? new Date(expiresAt).toISOString() : undefined, max_downloads: maxDownloads ? Number(maxDownloads) : undefined }); }}><p className="dialog-subtitle">为“{file.original_name}”创建一个可控下载链接。</p><label>访问密码 <span className="optional">可选</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="留空则无需密码" /></label><label>过期时间 <span className="optional">可选</span><input value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} type="datetime-local" /></label><label>最大下载次数 <span className="optional">可选</span><input value={maxDownloads} onChange={(event) => setMaxDownloads(event.target.value)} type="number" min="1" placeholder="留空则不限次数" /></label><DialogActions onClose={onClose} submit="创建并复制链接" /></form></Dialog>;
+}
+
+function SaveShareDialog({ folders, onClose, onSubmit }: { folders: FolderType[]; onClose: () => void; onSubmit: (data: { token: string; password: string; parent_id: number | null }) => void }) {
+  const [shareReference, setShareReference] = useState("");
+  const [password, setPassword] = useState("");
+  const [parentID, setParentID] = useState<number | null>(null);
+  const token = shareTokenFromReference(shareReference);
+
+  return <Dialog title="保存分享文件" onClose={onClose}><form className="dialog-form" onSubmit={(event) => { event.preventDefault(); onSubmit({ token, password, parent_id: parentID }); }}><p className="dialog-subtitle">输入分享令牌或完整公开链接，将文件保存到自己的工作区。</p><label>分享令牌或链接<input autoFocus value={shareReference} onChange={(event) => setShareReference(event.target.value)} placeholder="粘贴令牌或 https://.../share/令牌" required /></label><label>访问密码 <span className="optional">如有</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="分享未设置密码则留空" autoComplete="current-password" /></label><label>保存到<select value={parentID ?? "root"} onChange={(event) => setParentID(event.target.value === "root" ? null : Number(event.target.value))}><option value="root">我的文件（根目录）</option>{folders.map((folder) => <option key={folder.id} value={folder.id}>{folder.name}</option>)}</select></label><p className="field-hint">保存后会创建自己的文件记录，不需要先下载到本机。</p><DialogActions onClose={onClose} submit="保存到我的文件" disabled={!token} /></form></Dialog>;
+}
+
+function HelpDialog({ onClose }: { onClose: () => void }) {
+  return <Dialog title="使用帮助" onClose={onClose}><div className="help-content"><section><strong>整理文件</strong><p>上传文件后可新建文件夹、移动、重命名或移入回收站。</p></section><section><strong>分享文件</strong><p>在文件详情中创建分享链接；收到链接后可在“分享链接”中保存到自己的文件。</p></section><section><strong>查看目录</strong><p>双击文件夹进入，使用“返回上一级”或顶部路径回到其他目录。</p></section><button type="button" className="primary-button help-confirm" onClick={onClose}>知道了</button></div></Dialog>;
+}
+
+function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}><section className="dialog" role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}><header><h2>{title}</h2><button className="icon-button" type="button" aria-label="关闭" onClick={onClose}><X size={18} /></button></header>{children}</section></div>;
+}
+
+function DialogActions({ onClose, submit, disabled = false }: { onClose: () => void; submit: string; disabled?: boolean }) { return <div className="dialog-actions"><button type="button" className="text-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={disabled}>{submit}</button></div>; }
+function UploadQueue({ items }: { items: UploadItem[] }) { return <div className="upload-queue">{items.map((item) => <div className="upload-queue-item" key={item.id}><div><span className={item.state === "failed" ? "queue-failed" : "queue-active"}>{item.state === "uploading" ? <LoaderCircle size={15} className="spin" /> : item.state === "finished" ? <ShieldCheck size={15} /> : <X size={15} />}</span><strong>{item.name}</strong></div><span>{item.state === "failed" ? "失败" : item.state === "finished" ? "已完成" : `${item.progress}%`}</span>{item.state !== "failed" && <div className="queue-meter"><i style={{ width: `${item.progress}%` }} /></div>}</div>)}</div>; }
+function EmptyFiles({ trash, searching }: { trash: boolean; searching: boolean }) { return <div className="empty-state">{trash ? <Trash2 size={28} /> : <File size={28} />}<p>{searching ? "未找到匹配文件" : trash ? "回收站为空" : "这个目录还没有文件"}</p><span>{searching ? "换一个关键词试试。" : trash ? "删除的文件会显示在这里。" : "拖入文件，或点击右上角上传。"}</span></div>; }
+function LoadingRows() { return <div className="loading-rows"><LoaderCircle size={20} className="spin" /><span>正在加载…</span></div>; }
+function IconAction({ label, tone, onClick, children }: { label: string; tone?: "danger"; onClick: () => void; children: ReactNode }) { return <button className={`row-icon ${tone === "danger" ? "danger" : ""}`} type="button" title={label} aria-label={label} onClick={onClick}>{children}</button>; }
+function FileKindIcon({ file, size = 20 }: { file: UserFile; size?: number }) { const type = file.content_type; if (type.startsWith("image/")) return <FileImage size={size} className="kind-image" />; if (type.startsWith("video/")) return <FileVideo size={size} className="kind-video" />; if (type.includes("zip") || type.includes("compressed") || /\.(zip|rar|7z|tar|gz)$/i.test(file.original_name)) return <FileArchive size={size} className="kind-archive" />; if (type.startsWith("text/") || type.includes("pdf") || type.includes("word") || type.includes("sheet")) return <FileText size={size} className="kind-text" />; return <File size={size} className="kind-file" />; }
+function navClass(active: boolean) { return `side-link ${active ? "active" : ""}`; }
+function toID(value: string | null) { const id = Number(value); return Number.isInteger(id) && id > 0 ? id : null; }
+function readFolderPath(value: string | null, fallback: number | null) {
+  const path = (value ?? "").split(",").map(Number).filter((id) => Number.isInteger(id) && id > 0);
+  return path.length > 0 ? path : fallback ? [fallback] : [];
+}
+function readFolderNames(value: string | null, expectedLength: number) {
+  const names = (value ?? "").split(",").map((name) => name.trim()).filter(Boolean);
+  return names.length === expectedLength ? names : Array.from({ length: expectedLength }, () => "当前文件夹");
+}
+function formatBytes(bytes: number) { if (!bytes) return "0 B"; const units = ["B", "KB", "MB", "GB", "TB"]; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1); return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : bytes / 1024 ** index >= 10 ? 1 : 2)} ${units[index]}`; }
+function formatDate(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "-" : new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date); }
+function publicShareURL(token: string) { return `${window.location.origin}/share/${encodeURIComponent(token)}`; }
+function shareTokenFromReference(value: string) {
+  const reference = value.trim();
+  if (!reference) return "";
+
+  try {
+    const parts = new URL(reference).pathname.split("/").filter(Boolean);
+    const shareIndex = parts.lastIndexOf("share");
+    if (shareIndex >= 0 && parts[shareIndex + 1]) return decodeURIComponent(parts[shareIndex + 1]);
+  } catch {
+    // 不是 URL 时按原始令牌处理。
+  }
+
+  return /\s/.test(reference) ? "" : reference;
+}
+function shortType(value: string) { if (!value) return "未知"; if (value.startsWith("image/")) return "图片"; if (value.startsWith("video/")) return "视频"; if (value.startsWith("text/")) return "文本"; if (value.includes("pdf")) return "PDF"; return value.split("/").at(-1)?.toUpperCase() ?? value; }
+function usagePercent(usage: StorageUsage | undefined) { if (!usage?.quota_bytes) return 0; return Math.min(Math.round((usage.used_bytes / usage.quota_bytes) * 100), 100); }
+function messageOf(error: unknown) { return error instanceof Error ? error.message : "发生未知错误"; }
