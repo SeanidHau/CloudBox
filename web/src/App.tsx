@@ -906,9 +906,14 @@ function MoveDialog({ selected, folders, currentParentID, onClose, onSubmit }: {
 
 function ShareDialog({ file, onClose, onSubmit }: { file: UserFile; onClose: () => void; onSubmit: (data: { password?: string; expires_at?: string; max_downloads?: number }) => void }) {
   const [password, setPassword] = useState("");
-  const [expiresAt, setExpiresAt] = useState("");
+  const [validDays, setValidDays] = useState("7");
   const [maxDownloads, setMaxDownloads] = useState("");
-  return <Dialog title="创建分享链接" onClose={onClose}><form className="dialog-form" onSubmit={(event) => { event.preventDefault(); onSubmit({ password: password || undefined, expires_at: expiresAt ? new Date(expiresAt).toISOString() : undefined, max_downloads: maxDownloads ? Number(maxDownloads) : undefined }); }}><p className="dialog-subtitle">为“{file.original_name}”创建受控分享链接。默认 7 天后过期，下载次数不限。</p><label>访问密码 <span className="optional">可选</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="留空则无需密码" /></label><label>过期时间 <span className="optional">高级设置</span><input value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} type="datetime-local" /></label><label>最大下载次数 <span className="optional">高级设置</span><input value={maxDownloads} onChange={(event) => setMaxDownloads(event.target.value)} type="number" min="1" placeholder="留空则不限次数" /></label><DialogActions onClose={onClose} submit="创建并复制链接" /></form></Dialog>;
+  return <Dialog title="创建分享链接" onClose={onClose}><form className="dialog-form" onSubmit={(event) => {
+    event.preventDefault();
+    const days = Number(validDays);
+    const expiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+    onSubmit({ password: password || undefined, expires_at: expiresAt, max_downloads: maxDownloads ? Number(maxDownloads) : undefined });
+  }}><p className="dialog-subtitle">为“{file.original_name}”创建受控分享链接。链接默认有效 7 天，下载次数不限。</p><label>访问密码 <span className="optional">可选</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="留空则无需密码" /></label><label>有效天数<input value={validDays} onChange={(event) => setValidDays(event.target.value)} type="number" min="1" max="365" step="1" required /><span className="field-hint">链接将在创建后按填写天数自动过期。</span></label><label>最大下载次数 <span className="optional">高级设置</span><input value={maxDownloads} onChange={(event) => setMaxDownloads(event.target.value)} type="number" min="1" placeholder="留空则不限次数" /></label><DialogActions onClose={onClose} submit="创建并复制链接" /></form></Dialog>;
 }
 
 function SaveShareDialog({ folders, onClose, onSubmit }: { folders: FolderType[]; onClose: () => void; onSubmit: (data: { token: string; password: string; parent_id: number | null }) => void }) {
