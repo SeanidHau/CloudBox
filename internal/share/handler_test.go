@@ -148,6 +148,71 @@ func TestHandlerCreateAndDownloadShare(t *testing.T) {
 	}
 }
 
+func TestHandlerCreateAndDownloadShareCollection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, repo, _ := newTestHandler(t)
+	firstID := createTestFile(t, repo, 1, "active")
+	secondID := createTestFile(t, repo, 1, "active")
+
+	router := gin.New()
+	router.POST("/api/share-collections", func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, int64(1))
+		handler.CreateCollection(c)
+	})
+	router.GET("/api/share-collections/:token", handler.PublicCollection)
+	router.GET("/api/share-collections/:token/files/:id/download", handler.DownloadCollectionFile)
+
+	createRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/api/share-collections",
+		strings.NewReader(`{"file_ids":[`+strconv.FormatInt(firstID, 10)+`,`+strconv.FormatInt(secondID, 10)+`],"password":"collection-password","max_downloads":1}`),
+	)
+	createRequest.Header.Set("Content-Type", "application/json")
+	createRecorder := httptest.NewRecorder()
+	router.ServeHTTP(createRecorder, createRequest)
+	if createRecorder.Code != http.StatusCreated {
+		t.Fatalf("create collection status = %d, want %d: %s", createRecorder.Code, http.StatusCreated, createRecorder.Body.String())
+	}
+
+	var createResponse struct {
+		Share CollectionShare `json:"share"`
+	}
+	if err := json.NewDecoder(createRecorder.Body).Decode(&createResponse); err != nil {
+		t.Fatalf("decode collection response: %v", err)
+	}
+	if createResponse.Share.FileCount != 2 {
+		t.Fatalf("collection file count = %d, want 2", createResponse.Share.FileCount)
+	}
+
+	publicRequest := httptest.NewRequest(http.MethodGet, "/api/share-collections/"+createResponse.Share.Token, nil)
+	publicRequest.Header.Set("X-Share-Password", "collection-password")
+	publicRecorder := httptest.NewRecorder()
+	router.ServeHTTP(publicRecorder, publicRequest)
+	if publicRecorder.Code != http.StatusOK {
+		t.Fatalf("public collection status = %d, want %d: %s", publicRecorder.Code, http.StatusOK, publicRecorder.Body.String())
+	}
+	if !strings.Contains(publicRecorder.Body.String(), "document.txt") {
+		t.Fatalf("public collection should include selected files: %s", publicRecorder.Body.String())
+	}
+
+	downloadPath := "/api/share-collections/" + createResponse.Share.Token + "/files/" + strconv.FormatInt(firstID, 10) + "/download"
+	downloadRequest := httptest.NewRequest(http.MethodGet, downloadPath, nil)
+	downloadRequest.Header.Set("X-Share-Password", "collection-password")
+	downloadRecorder := httptest.NewRecorder()
+	router.ServeHTTP(downloadRecorder, downloadRequest)
+	if downloadRecorder.Code != http.StatusOK {
+		t.Fatalf("collection download status = %d, want %d: %s", downloadRecorder.Code, http.StatusOK, downloadRecorder.Body.String())
+	}
+
+	secondDownloadRecorder := httptest.NewRecorder()
+	secondDownloadRequest := httptest.NewRequest(http.MethodGet, downloadPath, nil)
+	secondDownloadRequest.Header.Set("X-Share-Password", "collection-password")
+	router.ServeHTTP(secondDownloadRecorder, secondDownloadRequest)
+	if secondDownloadRecorder.Code != http.StatusGone {
+		t.Fatalf("limited collection download status = %d, want %d: %s", secondDownloadRecorder.Code, http.StatusGone, secondDownloadRecorder.Body.String())
+	}
+}
+
 func TestHandlerPublicInfoRequiresPasswordBeforeDisclosingFile(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler, repo, service := newTestHandler(t)

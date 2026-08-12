@@ -159,11 +159,32 @@ func (r *Repository) ChangePassword(userID int64, passwordHash string) (*User, e
 }
 
 func (r *Repository) RevokeAllUserShares(userID int64) (int64, error) {
-	result, err := r.db.Exec(`DELETE FROM file_shares WHERE user_file_id IN (SELECT id FROM user_files WHERE user_id = $1)`, userID)
+	tx, err := r.db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	defer func() { _ = tx.Rollback() }()
+
+	fileShares, err := tx.Exec(`DELETE FROM file_shares WHERE user_file_id IN (SELECT id FROM user_files WHERE user_id = $1)`, userID)
+	if err != nil {
+		return 0, err
+	}
+	collections, err := tx.Exec(`DELETE FROM share_collections WHERE owner_user_id = $1`, userID)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	fileShareCount, err := fileShares.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	collectionCount, err := collections.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return fileShareCount + collectionCount, nil
 }
 
 func (r *Repository) CreateInvitation(codeDigest string, codeHash string, createdByUserID int64, expiresAt time.Time) (*Invitation, error) {

@@ -23,6 +23,7 @@ var (
 	ErrShareSaveUnavailable   = errors.New("shared file save is unavailable")
 	ErrSharePasswordLocked    = errors.New("share password attempts are temporarily locked")
 	ErrShareDownloadRateLimit = errors.New("share download rate limit reached")
+	ErrShareCollectionEmpty   = errors.New("share collection requires at least two files")
 )
 
 const DefaultShareLifetime = 7 * 24 * time.Hour
@@ -159,6 +160,139 @@ func (s *Service) Create(
 		ExpiresAt:    expiresAt,
 		MaxDownloads: maxDownloads,
 	})
+}
+
+func (s *Service) CreateCollection(userID int64, fileIDs []int64, password string, expiresAt *time.Time, maxDownloads *int64) (*CollectionShare, error) {
+	uniqueIDs := make(map[int64]struct{}, len(fileIDs))
+	uniqueFileIDs := make([]int64, 0, len(fileIDs))
+	for _, fileID := range fileIDs {
+		if fileID <= 0 {
+			return nil, ErrFileNotFound
+		}
+		if _, exists := uniqueIDs[fileID]; !exists {
+			uniqueFileIDs = append(uniqueFileIDs, fileID)
+			uniqueIDs[fileID] = struct{}{}
+		}
+	}
+	if len(uniqueIDs) < 2 {
+		return nil, ErrShareCollectionEmpty
+	}
+	for _, fileID := range uniqueFileIDs {
+		hasFile, err := s.repo.HasActiveFile(userID, fileID)
+		if err != nil {
+			return nil, err
+		}
+		if !hasFile {
+			return nil, ErrFileNotFound
+		}
+	}
+	if expiresAt == nil {
+		defaultExpiry := time.Now().UTC().Add(DefaultShareLifetime)
+		expiresAt = &defaultExpiry
+	}
+	if !expiresAt.After(time.Now()) {
+		return nil, ErrShareExpirationInvalid
+	}
+	if maxDownloads != nil && *maxDownloads <= 0 {
+		return nil, ErrDownloadLimitInvalid
+	}
+	var passwordHash string
+	if password != "" {
+		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, err
+		}
+		passwordHash = string(hash)
+	}
+	token, err := generateToken()
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.CreateCollection(&CollectionShare{Token: token, OwnerUserID: userID, PasswordHash: passwordHash, ExpiresAt: expiresAt, MaxDownloads: maxDownloads}, uniqueFileIDs)
+}
+
+func (s *Service) GetPublicCollectionFromIP(token string, password string, ipHash string) (*PublicCollection, error) {
+	if _, err := s.findAccessibleCollection(token, password, ipHash); err != nil {
+		_ = s.audit(token, ipHash, AccessInfo, accessResult(err))
+		return nil, err
+	}
+	files, err := s.repo.ListCollectionFiles(token)
+	if err != nil || len(files) == 0 {
+		_ = s.audit(token, ipHash, AccessInfo, AccessDenied)
+		if err != nil {
+			return nil, err
+		}
+		return nil, ErrShareNotFound
+	}
+	if err := s.audit(token, ipHash, AccessInfo, AccessAllowed); err != nil {
+		return nil, err
+	}
+	return &PublicCollection{Files: files}, nil
+}
+
+func (s *Service) OpenCollectionFileForDownloadFromIP(token string, fileID int64, password string, ipHash string) (*SharedFile, io.ReadSeekCloser, error) {
+	if _, err := s.findAccessibleCollection(token, password, ipHash); err != nil {
+		_ = s.audit(token, ipHash, AccessDownload, accessResult(err))
+		return nil, nil, err
+	}
+	file, err := s.repo.FindCollectionFile(token, fileID)
+	if err != nil {
+		_ = s.audit(token, ipHash, AccessDownload, AccessDenied)
+		return nil, nil, err
+	}
+	if s.downloadPolicy != nil {
+		if err := s.downloadPolicy.CheckFileObjectDownload(file.ObjectID); err != nil {
+			_ = s.audit(token, ipHash, AccessDownload, AccessDenied)
+			return nil, nil, fmt.Errorf("%w: %v", ErrSharedFileUnavailable, err)
+		}
+	}
+	if !s.accessControl.AllowDownload(token, ipHash) {
+		_ = s.audit(token, ipHash, AccessDownload, AccessRateLimited)
+		return nil, nil, ErrShareDownloadRateLimit
+	}
+	reader, err := s.storage.Open(file.StoragePath)
+	if err != nil {
+		_ = s.audit(token, ipHash, AccessDownload, AccessDenied)
+		return nil, nil, err
+	}
+	reserved, err := s.repo.ReserveCollectionDownload(token)
+	if err != nil || !reserved {
+		_ = reader.Close()
+		_ = s.audit(token, ipHash, AccessDownload, AccessDenied)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, ErrDownloadLimitReached
+	}
+	if err := s.audit(token, ipHash, AccessDownload, AccessAllowed); err != nil {
+		_ = reader.Close()
+		return nil, nil, err
+	}
+	return file, reader, nil
+}
+
+func (s *Service) findAccessibleCollection(token string, password string, ipHash string) (*CollectionShare, error) {
+	if s.accessControl.PasswordLocked(token, ipHash) {
+		return nil, ErrSharePasswordLocked
+	}
+	share, err := s.repo.FindCollectionByToken(token)
+	if err != nil {
+		return nil, err
+	}
+	if share.ExpiresAt == nil || !share.ExpiresAt.After(time.Now()) {
+		return nil, ErrShareExpired
+	}
+	if share.PasswordHash != "" {
+		if password == "" {
+			return nil, ErrSharePasswordRequired
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(share.PasswordHash), []byte(password)); err != nil {
+			s.accessControl.RecordPasswordFailure(token, ipHash)
+			return nil, ErrSharePasswordInvalid
+		}
+	}
+	s.accessControl.ClearPasswordFailures(token, ipHash)
+	return share, nil
 }
 
 // GetPublicFile verifies that a visitor may view share information. Unlike a
@@ -457,4 +591,12 @@ func (s *Service) List(userID int64) ([]Share, error) {
 
 func (s *Service) Revoke(userID int64, token string) error {
 	return s.repo.DeleteByToken(userID, token)
+}
+
+func (s *Service) ListCollections(userID int64) ([]CollectionShare, error) {
+	return s.repo.ListCollectionsByUser(userID)
+}
+
+func (s *Service) RevokeCollection(userID int64, token string) error {
+	return s.repo.DeleteCollectionByToken(userID, token)
 }

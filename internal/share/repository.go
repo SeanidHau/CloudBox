@@ -3,6 +3,7 @@ package share
 import (
 	"database/sql"
 	"errors"
+	"time"
 )
 
 var (
@@ -12,6 +13,136 @@ var (
 
 type Repository struct {
 	db *sql.DB
+}
+
+func (r *Repository) CreateCollection(share *CollectionShare, fileIDs []int64) (*CollectionShare, error) {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var passwordHash any
+	if share.PasswordHash != "" {
+		passwordHash = share.PasswordHash
+	}
+	if _, err := tx.Exec(`INSERT INTO share_collections (token, owner_user_id, password_hash, expires_at, max_downloads) VALUES ($1, $2, $3, $4, $5)`, share.Token, share.OwnerUserID, passwordHash, share.ExpiresAt, share.MaxDownloads); err != nil {
+		return nil, err
+	}
+	for _, fileID := range fileIDs {
+		if _, err := tx.Exec(`INSERT INTO share_collection_items (collection_token, user_file_id) VALUES ($1, $2)`, share.Token, fileID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return r.FindCollectionByToken(share.Token)
+}
+
+func (r *Repository) FindCollectionByToken(token string) (*CollectionShare, error) {
+	row := r.db.QueryRow(`SELECT sc.token, sc.owner_user_id, sc.password_hash, sc.expires_at, sc.max_downloads, sc.download_count, sc.created_at, (SELECT COUNT(*) FROM share_collection_items sci WHERE sci.collection_token = sc.token) FROM share_collections sc WHERE sc.token = $1`, token)
+	share, err := scanCollectionShare(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrShareNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return share, nil
+}
+
+func (r *Repository) ListCollectionFiles(token string) ([]PublicFile, error) {
+	rows, err := r.db.Query(`SELECT uf.id, uf.original_name, uf.size, uf.content_type, EXISTS(SELECT 1 FROM file_previews fp WHERE fp.file_object_id = uf.object_id) FROM share_collection_items sci JOIN user_files uf ON uf.id = sci.user_file_id WHERE sci.collection_token = $1 AND uf.status = 'active' ORDER BY uf.created_at DESC`, token)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	files := make([]PublicFile, 0)
+	for rows.Next() {
+		var file PublicFile
+		if err := rows.Scan(&file.ID, &file.OriginalName, &file.Size, &file.ContentType, &file.HasPreview); err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return files, nil
+}
+
+func (r *Repository) FindCollectionFile(token string, fileID int64) (*SharedFile, error) {
+	var file SharedFile
+	err := r.db.QueryRow(`SELECT fo.id, uf.id, uf.original_name, uf.storage_path, uf.size, uf.content_type, fo.file_hash FROM share_collection_items sci JOIN user_files uf ON uf.id = sci.user_file_id JOIN file_objects fo ON fo.id = uf.object_id WHERE sci.collection_token = $1 AND sci.user_file_id = $2 AND uf.status = 'active'`, token, fileID).Scan(&file.ObjectID, &file.ID, &file.OriginalName, &file.StoragePath, &file.Size, &file.ContentType, &file.FileHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrFileNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &file, nil
+}
+
+func (r *Repository) ReserveCollectionDownload(token string) (bool, error) {
+	result, err := r.db.Exec(`UPDATE share_collections SET download_count = download_count + 1 WHERE token = $1 AND expires_at > CURRENT_TIMESTAMP AND (max_downloads IS NULL OR download_count < max_downloads)`, token)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected == 1, err
+}
+
+func (r *Repository) ListCollectionsByUser(userID int64) ([]CollectionShare, error) {
+	rows, err := r.db.Query(`SELECT sc.token, sc.owner_user_id, sc.password_hash, sc.expires_at, sc.max_downloads, sc.download_count, sc.created_at, (SELECT COUNT(*) FROM share_collection_items sci WHERE sci.collection_token = sc.token) FROM share_collections sc WHERE sc.owner_user_id = $1 ORDER BY sc.created_at DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	shares := make([]CollectionShare, 0)
+	for rows.Next() {
+		share, err := scanCollectionShare(rows)
+		if err != nil {
+			return nil, err
+		}
+		shares = append(shares, *share)
+	}
+	return shares, rows.Err()
+}
+
+func (r *Repository) DeleteCollectionByToken(userID int64, token string) error {
+	result, err := r.db.Exec(`DELETE FROM share_collections WHERE token = $1 AND owner_user_id = $2`, token, userID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrShareNotFound
+	}
+	return nil
+}
+
+func scanCollectionShare(scanner shareScanner) (*CollectionShare, error) {
+	var (
+		share        CollectionShare
+		passwordHash sql.NullString
+		expiresAt    time.Time
+		maxDownloads sql.NullInt64
+	)
+	if err := scanner.Scan(&share.Token, &share.OwnerUserID, &passwordHash, &expiresAt, &maxDownloads, &share.DownloadCount, &share.CreatedAt, &share.FileCount); err != nil {
+		return nil, err
+	}
+	share.ExpiresAt = &expiresAt
+	if passwordHash.Valid {
+		share.PasswordHash = passwordHash.String
+	}
+	if maxDownloads.Valid {
+		share.MaxDownloads = &maxDownloads.Int64
+	}
+	return &share, nil
 }
 
 func NewRepository(db *sql.DB) *Repository {

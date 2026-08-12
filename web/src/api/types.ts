@@ -41,11 +41,25 @@ export interface Share {
 	has_preview: boolean;
 }
 
+export interface CollectionShare {
+  token: string;
+  expires_at: string;
+  max_downloads: number | null;
+  download_count: number;
+  created_at: string;
+  file_count: number;
+}
+
 export interface PublicShareFile {
+  id?: number;
 	original_name: string;
 	size: number;
 	content_type: string;
 	has_preview: boolean;
+}
+
+export interface PublicShareCollection {
+  files: PublicShareFile[];
 }
 
 export interface BackgroundJob {

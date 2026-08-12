@@ -3,6 +3,7 @@ import {
   Archive,
   ArrowLeft,
   Check,
+  CheckSquare,
   ChevronLeft,
   ChevronRight,
   CircleHelp,
@@ -30,6 +31,7 @@ import {
   Settings,
   ShieldCheck,
   Share2,
+  Square,
   Trash2,
   Upload,
   X
@@ -46,7 +48,7 @@ import {
 } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "./api/client";
-import type { AccountUser, CreatedInvitation, Folder as FolderType, Invitation, PublicShareFile, Session, Share, StorageUsage, UserFile } from "./api/types";
+import type { AccountUser, CollectionShare, CreatedInvitation, Folder as FolderType, Invitation, PublicShareCollection, PublicShareFile, Session, Share, StorageUsage, UserFile } from "./api/types";
 import { clearSession, readSession, writeSession } from "./auth/session";
 import {
   findUploadResumePoint,
@@ -77,6 +79,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/share/:token" element={<PublicSharePage />} />
+      <Route path="/share-collection/:token" element={<PublicShareCollectionPage />} />
       <Route path="/login" element={session ? <Navigate to="/files" replace /> : <LoginPage onAuthenticated={setSession} />} />
       <Route path="*" element={session ? session.must_change_password ? <ChangePasswordPage session={session} onChanged={() => setSession(null)} /> : <Workspace session={session} onLogout={() => setSession(null)} /> : <Navigate to="/login" replace />} />
     </Routes>
@@ -104,9 +107,10 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
       const next = { token, username: user.username, role: user.role, must_change_password: user.must_change_password };
       writeSession(next);
       onAuthenticated(next);
-      const pendingDownload = sessionStorage.getItem("cloudbox.pending-share-download");
+      const pendingDownload = sessionStorage.getItem("cloudbox.pending-share-download")
+        || sessionStorage.getItem("cloudbox.pending-share-collection-download");
       const destination = new URLSearchParams(location.search).get("next");
-      navigate(pendingDownload && destination?.startsWith("/share/") ? destination : "/files", { replace: true });
+      navigate(pendingDownload && destination?.startsWith("/share") ? destination : "/files", { replace: true });
     } catch (err) {
       setError(messageOf(err));
     } finally {
@@ -282,17 +286,57 @@ function PublicSharePage() {
   );
 }
 
+function PublicShareCollectionPage() {
+  const { token = "" } = useParams();
+  const navigate = useNavigate();
+  const [password, setPassword] = useState("");
+  const [collection, setCollection] = useState<PublicShareCollection | null>(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const pending = sessionStorage.getItem("cloudbox.pending-share-collection-download");
+    if (!pending || !readSession()) return;
+    try {
+      const parsed = JSON.parse(pending) as { token?: string; password?: string; fileID?: number };
+      if (parsed.token !== token || !parsed.fileID) return;
+      sessionStorage.removeItem("cloudbox.pending-share-collection-download");
+      setPassword(parsed.password ?? "");
+      void api.downloadCollectionFile(token, parsed.fileID, parsed.password ?? "").catch((err) => setError(messageOf(err)));
+    } catch {
+      sessionStorage.removeItem("cloudbox.pending-share-collection-download");
+    }
+  }, [token]);
+
+  async function unlock(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true); setError("");
+    try { const result = await api.publicShareCollection(token, password); setCollection(result.collection); } catch (err) { setError(messageOf(err)); } finally { setLoading(false); }
+  }
+  async function download(file: PublicShareFile) {
+    if (!readSession()) {
+      sessionStorage.setItem("cloudbox.pending-share-collection-download", JSON.stringify({ token, password, fileID: file.id }));
+      navigate(`/login?next=${encodeURIComponent(`/share-collection/${token}`)}`, { replace: true });
+      return;
+    }
+    try { await api.downloadCollectionFile(token, file.id ?? 0, password); } catch (err) { setError(messageOf(err)); }
+  }
+  return <main className="public-share-page"><header className="public-share-header"><div className="brand-inline"><span className="brand-mark"><Cloud size={18} /></span>CloudBox</div></header><section className="public-share-card public-collection-card"><div className="public-share-icon"><Share2 size={28} /></div><p className="eyebrow">SHARED COLLECTION</p><h1>{collection ? `分享了 ${collection.files.length} 个文件` : "有人向你分享了一组文件"}</h1><p className="public-share-copy">验证访问权限后可查看文件目录。下载文件需要登录。</p>{!collection ? <form className="public-share-form" onSubmit={unlock}><label>访问密码 <span className="optional">如有</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="未设置密码则留空" /></label>{error && <p className="form-error">{error}</p>}<button className="primary-button public-share-download" type="submit" disabled={loading}>{loading ? <LoaderCircle size={17} className="spin" /> : <ShieldCheck size={17} />}{loading ? "正在验证" : "查看分享内容"}</button></form> : <div className="public-collection-list">{collection.files.map((file) => <div className="public-collection-file" key={file.id ?? file.original_name}><FileKindIcon file={{ id: file.id ?? 0, user_id: 0, parent_id: null, original_name: file.original_name, storage_path: "", size: file.size, content_type: file.content_type, status: "active", availability: "ready", created_at: "" }} /><span><strong>{file.original_name}</strong><small>{formatBytes(file.size)} · {shortType(file.content_type)}</small></span><button className="secondary-button compact" type="button" onClick={() => void download(file)}>下载</button></div>)}</div>}{collection && error && <p className="form-error">{error}</p>}</section></main>;
+}
+
 function Workspace({ session, onLogout }: { session: Session; onLogout: () => void }) {
   const location = useLocation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selected, setSelected] = useState<SelectedItem>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedFileIDs, setSelectedFileIDs] = useState<Set<number>>(() => new Set());
   const [search, setSearch] = useState("");
   const [searchKind, setSearchKind] = useState<"" | "image" | "video" | "other">("");
   const [searchPeriod, setSearchPeriod] = useState<"" | "7d" | "30d" | "year" | "older">("");
   const [toast, setToast] = useState<Toast>(null);
-  const [dialog, setDialog] = useState<"upload" | "folder" | "rename" | "move" | "share" | "save-share" | null>(null);
+  const [dialog, setDialog] = useState<"upload" | "folder" | "rename" | "move" | "share" | "share-collection" | "save-share" | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [imageViewer, setImageViewer] = useState<UserFile | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -319,6 +363,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   const rootFoldersQuery = useQuery({ queryKey: ["folders", null], queryFn: () => api.listFolders(null) });
   const storageQuery = useQuery({ queryKey: ["storage"], queryFn: api.storage });
   const sharesQuery = useQuery({ queryKey: ["shares"], queryFn: api.listShares, enabled: view === "shares" });
+  const collectionSharesQuery = useQuery({ queryKey: ["share-collections"], queryFn: api.listShareCollections, enabled: view === "shares" });
   const searchRange = useMemo(() => {
     const now = new Date();
     const yearStart = new Date(now.getFullYear(), 0, 1);
@@ -335,7 +380,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     enabled: isSearching
   });
 
-  useEffect(() => setSelected(null), [location.pathname, parentID]);
+  useEffect(() => { setSelected(null); setSelectionMode(false); setSelectedFileIDs(new Set()); }, [location.pathname, parentID]);
   useEffect(() => {
     if (!toast) return undefined;
     const timer = window.setTimeout(() => setToast(null), 4200);
@@ -390,6 +435,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     void queryClient.invalidateQueries({ queryKey: ["trash"] });
     void queryClient.invalidateQueries({ queryKey: ["storage"] });
     void queryClient.invalidateQueries({ queryKey: ["shares"] });
+    void queryClient.invalidateQueries({ queryKey: ["share-collections"] });
     void queryClient.invalidateQueries({ queryKey: ["file-search"] });
   }
 
@@ -470,6 +516,35 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
       invalidateWorkspace();
       show(permanent ? "文件已彻底删除" : "文件已移入回收站");
     } catch (err) {
+      show(messageOf(err), "error");
+    }
+  }
+
+  function toggleFileSelection(fileID: number) {
+    setSelectedFileIDs((current) => {
+      const next = new Set(current);
+      if (next.has(fileID)) next.delete(fileID);
+      else next.add(fileID);
+      return next;
+    });
+  }
+
+  function closeSelectionMode() {
+    setSelectionMode(false);
+    setSelectedFileIDs(new Set());
+  }
+
+  async function removeSelectedFiles() {
+    const selectedFiles = files.filter((file) => selectedFileIDs.has(file.id));
+    if (selectedFiles.length === 0) return;
+    if (!window.confirm(`将选中的 ${selectedFiles.length} 个文件移入回收站，并撤销它们的分享链接？`)) return;
+    try {
+      await Promise.all(selectedFiles.map((file) => api.deleteFile(file.id)));
+      closeSelectionMode();
+      invalidateWorkspace();
+      show(`已将 ${selectedFiles.length} 个文件移入回收站`);
+    } catch (err) {
+      invalidateWorkspace();
       show(messageOf(err), "error");
     }
   }
@@ -578,7 +653,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
               {folderPath.map((id, index) => <span className="breadcrumb-item" key={id}><ChevronRight size={16} />{index === folderPath.length - 1 ? <span>{folderNames[index] || "当前文件夹"}</span> : <button type="button" className="breadcrumb-root" onClick={() => goToPath(index)}>{folderNames[index] || "当前文件夹"}</button>}</span>)}
             </> : <span className="topbar-context">{currentTitle}</span>}
           </div>
-          <div className="topbar-actions">
+          <div className={`topbar-actions ${view === "files" ? "with-search" : ""}`}>
             {view === "files" && <label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索全部文件" /></label>}
             <button type="button" className="icon-button" title="帮助" aria-label="打开帮助" aria-expanded={helpOpen} onClick={() => { setHelpOpen(true); setAccountMenuOpen(false); }}><CircleHelp size={19} /></button>
             <div className="account-menu-wrap" ref={accountMenuRef}>
@@ -596,6 +671,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           <div className="page-heading">
             <div><p className="eyebrow">WORKSPACE</p>{view === "files" && parentID && <button type="button" className="back-button" onClick={goUp}><ArrowLeft size={16} />返回上一级</button>}<h1>{currentTitle}</h1></div>
             {view === "files" && <div className="heading-actions">
+              <button type="button" className="secondary-button" onClick={() => selectionMode ? closeSelectionMode() : setSelectionMode(true)}>{selectionMode ? <X size={17} /> : <CheckSquare size={17} />}{selectionMode ? "取消选择" : "选择"}</button>
               <button type="button" className="secondary-button" onClick={() => setDialog("folder")}><FolderPlus size={17} />新建文件夹</button>
               <button type="button" className="primary-button" onClick={() => setDialog("upload")}><Upload size={17} />上传文件</button>
             </div>}
@@ -618,24 +694,25 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           {view === "settings" ? (
             <SettingsView session={session} usage={storageQuery.data} />
           ) : view === "shares" ? (
-            <SharesView shares={sharesQuery.data?.shares ?? []} loading={isLoading} error={loadError} onCopy={() => show("分享链接已复制到剪贴板")} onRevoke={async (share) => {
+            <SharesView shares={sharesQuery.data?.shares ?? []} collections={collectionSharesQuery.data?.shares ?? []} loading={isLoading || collectionSharesQuery.isLoading} error={loadError ?? collectionSharesQuery.error} onCopy={() => show("分享链接已复制到剪贴板")} onRevoke={async (share) => {
               if (!window.confirm("撤销该分享链接？")) return;
               try { await api.revokeShare(share.token); invalidateWorkspace(); show("分享链接已撤销"); } catch (err) { show(messageOf(err), "error"); }
-            }} />
+            }} onRevokeCollection={async (share) => { if (!window.confirm("撤销这组文件的分享链接？")) return; try { await api.revokeShareCollection(share.token); invalidateWorkspace(); show("多文件分享链接已撤销"); } catch (err) { show(messageOf(err), "error"); } }} />
           ) : (
             <div className={`file-layout ${view} ${selected ? "details-open" : ""}`}>
               <section className="file-surface" onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); void handleUpload(event.dataTransfer.files); }}>
                 {dragging && <div className="drop-overlay"><Upload size={24} /><strong>释放以上传到当前目录</strong><span>上传后会完成处理，完成后即可访问</span></div>}
                 <div className="file-table-wrap">
                   <div className="section-label">{view === "trash" ? "已删除文件" : isSearching ? "搜索结果" : "目录内容"} <span>{view === "trash" ? filteredFiles.length : entries.length}</span></div>
+                  {view === "files" && selectionMode && <div className="selection-bar"><span>已选 {selectedFileIDs.size} 项</span><div><button className="secondary-button compact" type="button" onClick={() => setSelectedFileIDs(new Set(files.map((file) => file.id)))}>全选文件</button><button className="secondary-button compact" type="button" onClick={() => setDialog("share-collection")} disabled={selectedFileIDs.size < 2}><Share2 size={16} />合并分享</button><button className="danger-button compact" type="button" onClick={() => void removeSelectedFiles()} disabled={selectedFileIDs.size === 0}><Trash2 size={16} />移入回收站</button></div></div>}
                   <div className="file-table">
                     <div className="file-row file-row-head"><span>名称</span><span>大小</span><span>类型</span><span>创建时间</span><span /></div>
                     {isLoading && <LoadingRows />}
                     {loadError && <div className="empty-state error-state"><p>无法加载内容</p><span>{messageOf(loadError)}</span></div>}
                     {!isLoading && !loadError && (view === "trash" ? filteredFiles.length : entries.length) === 0 && <EmptyFiles trash={view === "trash"} searching={Boolean(search)} />}
-                    {view === "trash" ? filteredFiles.map((file) => <FileRow key={file.id} file={file} selected={selected?.type === "file" && selected.value.id === file.id} trash onSelect={() => setSelected({ type: "file", value: file })} onDownload={() => void downloadFile(file)} onDelete={() => void removeFile(file, true)} onRestore={() => void restoreFile(file)} />) : entries.map((entry) => <DirectoryEntryRow key={`${entry.type}-${entry.value.id}`} entry={entry} selected={selected?.type === entry.type && selected.value.id === entry.value.id} onSelect={() => setSelected(entry)} onOpenFolder={() => entry.type === "folder" && openFolder(entry.value)} onDownload={() => entry.type === "file" && void downloadFile(entry.value)} onDelete={() => entry.type === "file" && void removeFile(entry.value)} />)}
+                    {view === "trash" ? filteredFiles.map((file) => <FileRow key={file.id} file={file} selected={selected?.type === "file" && selected.value.id === file.id} trash onSelect={() => setSelected({ type: "file", value: file })} onDownload={() => void downloadFile(file)} onDelete={() => void removeFile(file, true)} onRestore={() => void restoreFile(file)} />) : entries.map((entry) => <DirectoryEntryRow key={`${entry.type}-${entry.value.id}`} entry={entry} selected={selected?.type === entry.type && selected.value.id === entry.value.id} selecting={selectionMode && entry.type === "file"} checked={entry.type === "file" && selectedFileIDs.has(entry.value.id)} onToggle={() => entry.type === "file" && toggleFileSelection(entry.value.id)} onSelect={() => setSelected(entry)} onOpenFolder={() => entry.type === "folder" && openFolder(entry.value)} onDownload={() => entry.type === "file" && void downloadFile(entry.value)} onDelete={() => entry.type === "file" && void removeFile(entry.value)} />)}
                   </div>
-                  {view === "files" && <MediaGrid entries={entries} onOpenFolder={openFolder} onSelect={(entry) => setSelected(entry)} onPreview={(file) => setImageViewer(file)} />}
+                  {view === "files" && <MediaGrid entries={entries} selecting={selectionMode} selectedFileIDs={selectedFileIDs} onToggle={toggleFileSelection} onOpenFolder={openFolder} onSelect={(entry) => setSelected(entry)} onPreview={(file) => setImageViewer(file)} />}
                 </div>
               </section>
               {selected && <DetailPanel selected={selected} trash={view === "trash"} onClose={() => setSelected(null)} onDownload={() => selected.type === "file" && void downloadFile(selected.value)} onDelete={() => selected.type === "file" ? void removeFile(selected.value, view === "trash") : void removeFolder(selected.value)} onRestore={() => selected.type === "file" && void restoreFile(selected.value)} onRename={() => setDialog("rename")} onMove={() => setDialog("move")} onShare={() => setDialog("share")} onPreview={() => selected.type === "file" && isInlinePreviewable(selected.value) && setImageViewer(selected.value)} />}
@@ -678,6 +755,9 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           invalidateWorkspace(); setDialog(null); show("分享链接已创建并复制到剪贴板");
         } catch (err) { show(messageOf(err), "error"); }
       }} />}
+      {dialog === "share-collection" && <ShareCollectionDialog files={files.filter((file) => selectedFileIDs.has(file.id))} onClose={() => setDialog(null)} onSubmit={async (data) => {
+        try { const { share } = await api.createShareCollection(data); await navigator.clipboard.writeText(publicCollectionShareURL(share.token)); closeSelectionMode(); invalidateWorkspace(); setDialog(null); show("多文件分享链接已创建并复制到剪贴板"); } catch (err) { show(messageOf(err), "error"); }
+      }} />}
       {dialog === "save-share" && <SaveShareDialog folders={rootFoldersQuery.data?.folders ?? []} onClose={() => setDialog(null)} onSubmit={async (data) => {
         try {
           const { file } = await api.saveSharedFile(data.token, data.password, data.parent_id);
@@ -703,14 +783,14 @@ function FileRow({ file, selected, trash, onSelect, onDownload, onDelete, onRest
   </div>;
 }
 
-function DirectoryEntryRow({ entry, selected, onSelect, onOpenFolder, onDownload, onDelete }: { entry: DirectoryEntry; selected: boolean; onSelect: () => void; onOpenFolder: () => void; onDownload: () => void; onDelete: () => void }) {
+function DirectoryEntryRow({ entry, selected, selecting, checked, onToggle, onSelect, onOpenFolder, onDownload, onDelete }: { entry: DirectoryEntry; selected: boolean; selecting: boolean; checked: boolean; onToggle: () => void; onSelect: () => void; onOpenFolder: () => void; onDownload: () => void; onDelete: () => void }) {
   const isFolder = entry.type === "folder";
   const name = isFolder ? entry.value.name : entry.value.original_name;
   const createdAt = isFolder ? entry.value.created_at : entry.value.created_at;
 
   const accessible = isFolder || entry.value.availability === "ready";
-  return <div className={`file-row ${selected ? "selected" : ""} ${isFolder ? "folder-row" : ""}`} onClick={onSelect} onDoubleClick={isFolder ? onOpenFolder : accessible ? onDownload : undefined}>
-    <span className="file-name">{isFolder ? <FolderOpen size={20} className="kind-folder" fill="currentColor" /> : <FileKindIcon file={entry.value} />}<strong>{name}</strong></span>
+  return <div className={`file-row ${selected ? "selected" : ""} ${isFolder ? "folder-row" : ""} ${selecting ? "is-selecting" : ""}`} onClick={selecting ? onToggle : onSelect} onDoubleClick={selecting ? undefined : isFolder ? onOpenFolder : accessible ? onDownload : undefined}>
+    <span className="file-name">{selecting && <span className="row-select" aria-hidden="true">{checked ? <CheckSquare size={18} /> : <Square size={18} />}</span>}{isFolder ? <FolderOpen size={20} className="kind-folder" fill="currentColor" /> : <FileKindIcon file={entry.value} />}<strong>{name}</strong></span>
     <span>{formatBytes(entry.value.size)}</span>
     <span className="file-type">{isFolder ? "文件夹" : shortType(entry.value.content_type)}</span>
     <span>{formatDate(createdAt)}</span>
@@ -755,15 +835,15 @@ function DetailPanel({ selected, trash, onClose, onDownload, onDelete, onRestore
   </aside>;
 }
 
-function MediaGrid({ entries, onOpenFolder, onSelect, onPreview }: { entries: DirectoryEntry[]; onOpenFolder: (folder: FolderType) => void; onSelect: (entry: DirectoryEntry) => void; onPreview: (file: UserFile) => void }) {
+function MediaGrid({ entries, selecting, selectedFileIDs, onToggle, onOpenFolder, onSelect, onPreview }: { entries: DirectoryEntry[]; selecting: boolean; selectedFileIDs: Set<number>; onToggle: (fileID: number) => void; onOpenFolder: (folder: FolderType) => void; onSelect: (entry: DirectoryEntry) => void; onPreview: (file: UserFile) => void }) {
   return <div className="mobile-media-grid">{entries.map((entry) => {
     const folder = entry.type === "folder";
     const file = folder ? null : entry.value;
-    return <MediaTile key={`mobile-${entry.type}-${entry.value.id}`} entry={entry} onOpenFolder={onOpenFolder} onSelect={onSelect} onPreview={onPreview} />;
+    return <MediaTile key={`mobile-${entry.type}-${entry.value.id}`} entry={entry} selecting={selecting && !folder} checked={!folder && selectedFileIDs.has(entry.value.id)} onToggle={onToggle} onOpenFolder={onOpenFolder} onSelect={onSelect} onPreview={onPreview} />;
   })}</div>;
 }
 
-function MediaTile({ entry, onOpenFolder, onSelect, onPreview }: { entry: DirectoryEntry; onOpenFolder: (folder: FolderType) => void; onSelect: (entry: DirectoryEntry) => void; onPreview: (file: UserFile) => void }) {
+function MediaTile({ entry, selecting, checked, onToggle, onOpenFolder, onSelect, onPreview }: { entry: DirectoryEntry; selecting: boolean; checked: boolean; onToggle: (fileID: number) => void; onOpenFolder: (folder: FolderType) => void; onSelect: (entry: DirectoryEntry) => void; onPreview: (file: UserFile) => void }) {
   const folder = entry.type === "folder";
   const file = folder ? null : entry.value;
   const canPreview = Boolean(file && isInlinePreviewable(file));
@@ -776,7 +856,8 @@ function MediaTile({ entry, onOpenFolder, onSelect, onPreview }: { entry: Direct
     return () => { if (objectURL) URL.revokeObjectURL(objectURL); };
   }, [file?.id, file?.content_type, file?.availability]);
 
-  return <button type="button" className="mobile-media-tile" onClick={() => folder ? onOpenFolder(entry.value) : canPreview ? onPreview(file!) : onSelect(entry)}>
+  return <button type="button" className={`mobile-media-tile ${selecting ? "is-selecting" : ""} ${checked ? "is-checked" : ""}`} onClick={() => folder ? onOpenFolder(entry.value) : selecting ? onToggle(file!.id) : canPreview ? onPreview(file!) : onSelect(entry)}>
+    {selecting && <span className="tile-select" aria-hidden="true">{checked ? <CheckSquare size={20} /> : <Square size={20} />}</span>}
     <span className="mobile-media-icon">{thumbnail ? <img src={thumbnail} alt="" /> : folder ? <FolderOpen size={31} fill="currentColor" /> : <FileKindIcon file={file!} size={31} />}</span>
     <strong>{folder ? entry.value.name : file!.original_name}</strong>
     <small>{folder ? `${formatBytes(entry.value.size)} · 文件夹` : `${formatBytes(file!.size)} · ${availabilityLabel(file!.availability)}`}</small>
@@ -810,10 +891,11 @@ function ImageViewer({ file, images, onClose, onSelect, onDownload, onShare, onD
     {previous && <button className="image-viewer-nav previous" type="button" title="上一张" aria-label="上一张" onClick={(event) => { event.stopPropagation(); onSelect(previous); }}><ChevronLeft size={24} /></button>}
     {next && <button className="image-viewer-nav next" type="button" title="下一张" aria-label="下一张" onClick={(event) => { event.stopPropagation(); onSelect(next); }}><ChevronRight size={24} /></button>}
     {source ? <img src={source} alt={file.original_name} onClick={(event) => event.stopPropagation()} /> : <p>{error || "正在加载图片…"}</p>}
+    <div className="image-viewer-mobile-actions" onClick={(event) => event.stopPropagation()}><button type="button" onClick={() => onShare(file)}><Share2 size={18} />分享</button><button type="button" onClick={() => onDownload(file)}><Download size={18} />下载</button><button type="button" className="danger" onClick={() => onDelete(file)}><Trash2 size={18} />删除</button></div>
   </div>;
 }
 
-function SharesView({ shares, loading, error, onCopy, onRevoke }: { shares: Share[]; loading: boolean; error: unknown; onCopy: () => void; onRevoke: (share: Share) => void }) {
+function SharesView({ shares, collections, loading, error, onCopy, onRevoke, onRevokeCollection }: { shares: Share[]; collections: CollectionShare[]; loading: boolean; error: unknown; onCopy: () => void; onRevoke: (share: Share) => void; onRevokeCollection: (share: CollectionShare) => void }) {
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
 
   async function copyShareLink(token: string) {
@@ -828,10 +910,22 @@ function SharesView({ shares, loading, error, onCopy, onRevoke }: { shares: Shar
     }
   }
 
-  return <section className="share-surface"><div className="share-intro"><div><p className="eyebrow">EXTERNAL ACCESS</p><h2>分享链接</h2><p>从文件详情创建链接。默认有效期为 7 天，可设置密码和下载次数。</p></div><Share2 size={28} /></div><div className="share-table"><div className="share-row share-row-head"><span>分享文件</span><span>下载次数</span><span>过期时间</span><span /></div>{loading && <LoadingRows />}{Boolean(error) && <div className="empty-state error-state"><p>无法加载分享链接</p><span>{messageOf(error)}</span></div>}{!loading && !error && shares.length === 0 && <div className="empty-state"><Share2 size={28} /><p>还没有有效的分享链接</p><span>在文件详情中点击“分享”即可创建。</span></div>}{shares.map((share) => {
+  return <section className="share-surface"><div className="share-intro"><div><p className="eyebrow">EXTERNAL ACCESS</p><h2>分享链接</h2><p>从文件详情创建链接。默认有效期为 7 天，可设置密码和下载次数。</p></div><Share2 size={28} /></div><div className="share-table"><div className="share-row share-row-head"><span>分享文件</span><span>下载次数</span><span>过期时间</span><span /></div>{loading && <LoadingRows />}{Boolean(error) && <div className="empty-state error-state"><p>无法加载分享链接</p><span>{messageOf(error)}</span></div>}{!loading && !error && shares.length === 0 && collections.length === 0 && <div className="empty-state"><Share2 size={28} /><p>还没有有效的分享链接</p><span>在文件详情中点击“分享”即可创建。</span></div>}{collections.map((share) => {
+    const copied = copiedToken === share.token;
+    return <div className="share-row share-collection-row" key={share.token}><span className="share-file-summary"><Share2 size={20} className="kind-text" /><span><strong>{share.file_count} 个文件的合并分享</strong><small>共享一个访问密码、有效期和下载限制</small></span><span className="share-token"><button type="button" className={copied ? "share-copy copied" : "share-copy"} title={copied ? "链接已复制" : "复制公开链接"} aria-label={copied ? "链接已复制" : "复制公开链接"} onClick={() => void copyCollectionShareLink(share.token)}>{copied ? <Check size={15} /> : <Link size={15} />}</button>{copied && <span className="copy-status" role="status">已复制</span>}</span></span><span>{share.download_count}{share.max_downloads ? ` / ${share.max_downloads}` : ""}</span><span>{formatDate(share.expires_at)}</span><span><IconAction label="撤销合并分享" tone="danger" onClick={() => onRevokeCollection(share)}><Trash2 size={16} /></IconAction></span></div>;
+  })}{shares.map((share) => {
     const copied = copiedToken === share.token;
     return <div className="share-row" key={share.token}><span className="share-file-summary"><FileKindIcon file={{ id: 0, user_id: 0, parent_id: null, original_name: share.original_name, storage_path: "", size: share.size, content_type: share.content_type, status: "active", availability: "ready", created_at: share.created_at }} /><span><strong>{share.original_name}</strong><small>{formatBytes(share.size)} · {shortType(share.content_type)}</small></span><span className="share-token"><button type="button" className={copied ? "share-copy copied" : "share-copy"} title={copied ? "链接已复制" : "复制公开链接"} aria-label={copied ? "链接已复制" : "复制公开链接"} onClick={() => void copyShareLink(share.token)}>{copied ? <Check size={15} /> : <Link size={15} />}</button>{copied && <span className="copy-status" role="status">已复制</span>}</span></span><span>{share.download_count}{share.max_downloads ? ` / ${share.max_downloads}` : ""}</span><span>{share.expires_at ? formatDate(share.expires_at) : "7 天后过期"}</span><span><IconAction label="撤销分享" tone="danger" onClick={() => onRevoke(share)}><Trash2 size={16} /></IconAction></span></div>;
   })}</div></section>;
+
+  async function copyCollectionShareLink(token: string) {
+    try {
+      await navigator.clipboard.writeText(publicCollectionShareURL(token));
+      setCopiedToken(token);
+      onCopy();
+      window.setTimeout(() => setCopiedToken((current) => current === token ? null : current), 1800);
+    } catch { setCopiedToken(null); }
+  }
 }
 
 function SettingsView({ session, usage }: { session: Session; usage: StorageUsage | undefined }) {
@@ -916,6 +1010,13 @@ function ShareDialog({ file, onClose, onSubmit }: { file: UserFile; onClose: () 
   }}><p className="dialog-subtitle">为“{file.original_name}”创建受控分享链接。链接默认有效 7 天，下载次数不限。</p><label>访问密码 <span className="optional">可选</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="留空则无需密码" /></label><label>有效天数<input value={validDays} onChange={(event) => setValidDays(event.target.value)} type="number" min="1" max="365" step="1" required /><span className="field-hint">链接将在创建后按填写天数自动过期。</span></label><label>最大下载次数 <span className="optional">高级设置</span><input value={maxDownloads} onChange={(event) => setMaxDownloads(event.target.value)} type="number" min="1" placeholder="留空则不限次数" /></label><DialogActions onClose={onClose} submit="创建并复制链接" /></form></Dialog>;
 }
 
+function ShareCollectionDialog({ files, onClose, onSubmit }: { files: UserFile[]; onClose: () => void; onSubmit: (data: { file_ids: number[]; password?: string; expires_at?: string; max_downloads?: number }) => void }) {
+  const [password, setPassword] = useState("");
+  const [validDays, setValidDays] = useState("7");
+  const [maxDownloads, setMaxDownloads] = useState("");
+  return <Dialog title="合并分享" onClose={onClose}><form className="dialog-form" onSubmit={(event) => { event.preventDefault(); onSubmit({ file_ids: files.map((file) => file.id), password: password || undefined, expires_at: new Date(Date.now() + Number(validDays) * 24 * 60 * 60 * 1000).toISOString(), max_downloads: maxDownloads ? Number(maxDownloads) : undefined }); }}><p className="dialog-subtitle">将 {files.length} 个文件放入同一个分享链接。任意源文件删除后，整个链接会失效。</p><div className="share-collection-file-list">{files.map((file) => <span key={file.id}><FileKindIcon file={file} size={16} />{file.original_name}</span>)}</div><label>访问密码 <span className="optional">可选</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" placeholder="留空则无需密码" /></label><label>有效天数<input value={validDays} onChange={(event) => setValidDays(event.target.value)} type="number" min="1" max="365" step="1" required /></label><label>最大下载次数 <span className="optional">高级设置</span><input value={maxDownloads} onChange={(event) => setMaxDownloads(event.target.value)} type="number" min="1" placeholder="留空则不限次数" /></label><DialogActions onClose={onClose} submit="创建并复制链接" /></form></Dialog>;
+}
+
 function SaveShareDialog({ folders, onClose, onSubmit }: { folders: FolderType[]; onClose: () => void; onSubmit: (data: { token: string; password: string; parent_id: number | null }) => void }) {
   const [shareReference, setShareReference] = useState("");
   const [password, setPassword] = useState("");
@@ -952,6 +1053,7 @@ function readFolderNames(value: string | null, expectedLength: number) {
 function formatBytes(bytes: number) { if (!bytes) return "0 B"; const units = ["B", "KB", "MB", "GB", "TB"]; const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1); return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : bytes / 1024 ** index >= 10 ? 1 : 2)} ${units[index]}`; }
 function formatDate(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? "-" : new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(date); }
 function publicShareURL(token: string) { return `${window.location.origin}/share/${encodeURIComponent(token)}`; }
+function publicCollectionShareURL(token: string) { return `${window.location.origin}/share-collection/${encodeURIComponent(token)}`; }
 function shareTokenFromReference(value: string) {
   const reference = value.trim();
   if (!reference) return "";

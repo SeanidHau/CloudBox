@@ -11,13 +11,13 @@ Web 工作台的接口边界见 [项目概况.md](项目概况.md)。其中明�
 - 文件夹创建、浏览、重命名、移动和空目录删除。
 - SHA-256 内容去重、秒传和按用户逻辑存储配额。
 - 分片上传、断点续传基础、分片校验、完整文件校验和合并。
-- 分享链接、公开图片预览、登录下载/保存副本、可选密码、过期时间和下载次数上限。
+- 单文件或多文件合并分享、公开图片预览、登录下载/保存副本、可选密码、过期时间和下载次数上限。
 - 公开链接按 IP 限制下载频率；密码连续错误会临时锁定，并记录匿名化访问审计。
 - 管理员邀请码、账号状态、容量档位、临时密码和分享撤销管理；管理员不默认访问用户私有文件。
 - 持久化后台任务、文件完整性校验、缩略图和可选 ClamAV 病毒扫描。
 - 本地磁盘或 MinIO 对象存储；SQLite 或 PostgreSQL；可选 Redis 用量缓存。
 - JSON 访问日志、Prometheus HTTP 指标、OpenTelemetry HTTP 链路追踪、GitHub Actions 和 Docker Compose。
-- React + TypeScript 文件工作台：邀请注册、文件与目录浏览、名称/类型/时间搜索、普通/分片上传与续传、回收站、分享链接、容量展示、图片预览和移动端媒体网格。
+- React + TypeScript 文件工作台：邀请注册、文件与目录浏览、名称/类型/时间搜索、普通/分片上传与续传、回收站、分享链接、批量删除、合并分享、容量展示、图片预览和移动端媒体网格。
 
 ## 快速开始
 
@@ -70,7 +70,8 @@ npm run dev
 - 邀请注册、登录、JWT 会话保存和临时密码强制修改。
 - 根目录与子目录浏览、创建目录、重命名、移动与空目录删除。
 - 小文件直接上传；大于 `5 MB` 的文件自动走分片初始化、逐块上传和合并完成接口。
-- 文件搜索、下载、回收站恢复/永久删除、创建与撤销分享链接。
+- 文件搜索、下载、回收站恢复/永久删除；选择多个文件后可批量移入回收站或创建一个合并分享链接。
+- 分享页支持单文件和多文件合并分享。公开访问者验证密码后可查看文件清单；下载仍要求登录。
 - 存储用量展示，以及使用鉴权请求读取图片缩略图。
 
 前端不伪造病毒扫描状态。扫描未完成时，下载或缩略图接口返回 `423`，前端会提示当前文件暂不可用；扫描未通过时按后端返回的 `403` 提示处理。文件详情中的“发起完整性校验”调用的是 `file.verify` 后台任务，不是病毒扫描任务。
@@ -243,10 +244,15 @@ Authorization: Bearer <JWT>
 | 创建分享链接 | `POST /api/files/:id/shares` |
 | 查看我的分享链接 | `GET /api/shares` |
 | 撤销分享链接 | `DELETE /api/shares/:token` |
+| 创建合并分享 | `POST /api/share-collections`，请求体包含至少两个 `file_ids` |
+| 查看我的合并分享 | `GET /api/share-collections` |
+| 撤销合并分享 | `DELETE /api/share-collections/:token` |
 | 公开分享信息 | `GET /api/shares/:token`，可选 `X-Share-Password` |
 | 公开图片预览 | `GET /api/shares/:token/preview`，可选 `X-Share-Password` |
 | 公开下载分享文件 | `GET /api/shares/:token/download`，可选 `X-Share-Password` |
 | 保存分享副本 | `POST /api/shares/:token/save` |
+| 查看公开合并分享 | `GET /api/share-collections/:token`，可选 `X-Share-Password` |
+| 下载合并分享中的文件 | `GET /api/share-collections/:token/files/:id/download`，需要登录，可选 `X-Share-Password` |
 | 初始化分片上传 | `POST /api/uploads/init` |
 | 上传分片 | `PUT /api/uploads/:id/chunks/:number` |
 | 查询上传状态 | `GET /api/uploads/:id` |
@@ -286,6 +292,8 @@ POST /api/uploads/:id/complete
 ### 公开分享保护
 
 公开分享的下载和保存副本按分享 token 与匿名化 IP 分别限速：单 IP 最多 20 次/分钟。密码连续错误 5 次后，该 IP 在该分享上锁定 10 分钟。系统审计 token、匿名化 IP、动作、结果和时间，不记录原始 IP。
+
+合并分享为至少两个同一所有者的活跃文件创建一个统一链接，并共享密码、有效期和下载次数上限。访问者通过验证后只能查看该链接内的文件清单；每下载一个文件都会消耗一次该链接的下载额度。任意源文件移入回收站后，整个合并链接立即失效，避免链接继续暴露不完整的文件集合。
 
 限制状态目前保存在 API 进程内，适合单实例部署。后续部署多个 API 实例时，应改用 Redis 等共享存储保存限速和锁定状态。
 

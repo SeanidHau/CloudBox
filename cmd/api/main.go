@@ -59,6 +59,7 @@ func main() {
 			"migrations/011_file_scans.sql",
 			"migrations/012_user_access.sql",
 			"migrations/013_share_access_audit.sql",
+			"migrations/014_share_collections.sql",
 		}
 
 	case "postgres":
@@ -71,6 +72,7 @@ func main() {
 			"migrations/postgres/005_file_scans.sql",
 			"migrations/postgres/006_user_access.sql",
 			"migrations/postgres/007_share_access_audit.sql",
+			"migrations/postgres/008_share_collections.sql",
 		}
 
 	default:
@@ -307,6 +309,7 @@ func main() {
 
 	api.GET("/shares/:token", shareHandler.PublicInfo)
 	api.GET("/shares/:token/preview", shareHandler.PublicPreview)
+	api.GET("/share-collections/:token", shareHandler.PublicCollection)
 
 	protected := api.Group("")
 	protected.Use(middleware.Auth(cfg.JWTSecret, authService.ValidateSession))
@@ -351,10 +354,14 @@ func main() {
 	ready.DELETE("/folders/:id", fileHandler.DeleteFolder)
 	ready.GET("/storage", fileHandler.GetStorageUsage)
 	ready.POST("/files/:id/shares", shareHandler.Create)
+	ready.POST("/share-collections", shareHandler.CreateCollection)
 	ready.POST("/shares/:token/save", shareHandler.Save)
 	ready.GET("/shares/:token/download", shareHandler.Download)
+	ready.GET("/share-collections/:token/files/:id/download", shareHandler.DownloadCollectionFile)
 	ready.GET("/shares", shareHandler.List)
+	ready.GET("/share-collections", shareHandler.ListCollections)
 	ready.DELETE("/shares/:token", shareHandler.Revoke)
+	ready.DELETE("/share-collections/:token", shareHandler.RevokeCollection)
 	ready.GET("/jobs/:id", jobHTTPHandler.Get)
 
 	runContext, stop := signal.NotifyContext(

@@ -1,5 +1,5 @@
 import { clearSession, readSession } from "../auth/session";
-import type { AccountUser, BackgroundJob, CreatedInvitation, Folder, Invitation, PublicShareFile, Share, StorageUsage, UploadStatus, UploadTask, UserFile } from "./types";
+import type { AccountUser, BackgroundJob, CollectionShare, CreatedInvitation, Folder, Invitation, PublicShareCollection, PublicShareFile, Share, StorageUsage, UploadStatus, UploadTask, UserFile } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -48,7 +48,8 @@ function userFacingError(message: string, status: number): string {
     "share has expired": "分享链接已过期。",
     "share download limit reached": "该分享链接的下载次数已用完。",
     "share download rate limit reached": "该分享下载请求过于频繁，请稍后再试。",
-    "shared file is unavailable": "该分享文件暂时不可用，请稍后重试。"
+    "shared file is unavailable": "该分享文件暂时不可用，请稍后重试。",
+    "share collection requires at least two files": "请至少选择两个文件再创建合并分享。"
   };
 
   if (messages[message]) return messages[message];
@@ -173,9 +174,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input)
     }),
+	createShareCollection: (input: { file_ids: number[]; password?: string; expires_at?: string; max_downloads?: number }) =>
+		request<{ share: CollectionShare }>("/api/share-collections", { method: "POST", body: JSON.stringify(input) }),
 	revokeShare: (token: string) => request<void>(`/api/shares/${token}`, { method: "DELETE" }),
+	listShareCollections: () => request<{ shares: CollectionShare[] }>("/api/share-collections"),
+	revokeShareCollection: (token: string) => request<void>(`/api/share-collections/${encodeURIComponent(token)}`, { method: "DELETE" }),
 	publicShareInfo: (token: string, password: string) =>
 		publicRequest<{ file: PublicShareFile }>(`/api/shares/${encodeURIComponent(token)}`, password),
+	publicShareCollection: (token: string, password: string) =>
+		publicRequest<{ collection: PublicShareCollection }>(`/api/share-collections/${encodeURIComponent(token)}`, password),
   saveSharedFile: (token: string, password: string, parentId: number | null) =>
     request<{ file: UserFile }>(`/api/shares/${encodeURIComponent(token)}/save`, {
       method: "POST",
@@ -316,6 +323,25 @@ export const api = {
 		const blob = await response.blob();
     const disposition = response.headers.get("Content-Disposition") ?? "";
     const name = disposition.match(/filename="?([^";]+)"?/)?.[1] ?? "download";
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = name;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  },
+  async downloadCollectionFile(token: string, fileId: number, password: string) {
+    const session = readSession();
+    const headers = new Headers();
+    if (session?.token) headers.set("Authorization", `Bearer ${session.token}`);
+    if (password) headers.set("X-Share-Password", password);
+    const response = await fetch(`/api/share-collections/${encodeURIComponent(token)}/files/${fileId}/download`, { headers });
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new ApiError(userFacingError(body?.error ?? "", response.status), response.status);
+    }
+    const blob = await response.blob();
+    const name = response.headers.get("Content-Disposition")?.match(/filename="?([^";]+)"?/)?.[1] ?? "download";
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
