@@ -28,7 +28,7 @@ func NewThumbnailJobHandler(service *Service) jobmodule.Handler {
 
 		err := service.GenerateThumbnailForActiveFile(ctx, payload.FileID)
 
-		if errors.Is(err, ErrFileNotFound) || errors.Is(err, ErrThumbUnsupportedContentType) {
+		if errors.Is(err, ErrFileNotFound) || errors.Is(err, ErrThumbUnsupportedContentType) || errors.Is(err, ErrVideoThumbnailUnavailable) {
 			return nil
 		}
 

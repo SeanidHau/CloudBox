@@ -15,7 +15,10 @@ RUN CGO_ENABLED=0 go build \
 
 FROM debian:bookworm-slim
 
-RUN groupadd --system cloudbox \
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system cloudbox \
     && useradd --system --gid cloudbox --home-dir /app cloudbox
 
 WORKDIR /app

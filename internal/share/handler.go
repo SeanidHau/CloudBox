@@ -158,6 +158,8 @@ func (h *Handler) SaveCollection(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid share password"})
 	case errors.Is(err, ErrSharePasswordLocked), errors.Is(err, ErrShareDownloadRateLimit):
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrShareAccessControlUnavailable):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "share access control is temporarily unavailable"})
 	case errors.Is(err, ErrShareExpired), errors.Is(err, ErrDownloadLimitReached):
 		c.JSON(http.StatusGone, gin.H{"error": err.Error()})
 	case errors.Is(err, ErrSharedFileUnavailable):
@@ -193,6 +195,10 @@ func (h *Handler) Download(c *gin.Context) {
 	}
 	if errors.Is(err, ErrShareDownloadRateLimit) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrShareAccessControlUnavailable) {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "share access control is temporarily unavailable"})
 		return
 	}
 	if errors.Is(err, ErrShareExpired) || errors.Is(err, ErrDownloadLimitReached) {
@@ -245,6 +251,8 @@ func writeShareAccessError(c *gin.Context, err error) bool {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid share password"})
 	case errors.Is(err, ErrSharePasswordLocked), errors.Is(err, ErrShareDownloadRateLimit):
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+	case errors.Is(err, ErrShareAccessControlUnavailable):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "share access control is temporarily unavailable"})
 	case errors.Is(err, ErrShareExpired), errors.Is(err, ErrDownloadLimitReached):
 		c.JSON(http.StatusGone, gin.H{"error": err.Error()})
 	case errors.Is(err, ErrSharedFileUnavailable):

@@ -173,10 +173,13 @@ func main() {
 		log.Fatalf("unsupported storage driver: %s", cfg.StorageDriver)
 	}
 
-	var fileServiceOptions []filemodule.ServiceOption
+	var (
+		fileServiceOptions []filemodule.ServiceOption
+		redisClient        *redis.Client
+	)
 
 	if cfg.Redis.Enabled {
-		redisClient := redis.NewClient(&redis.Options{
+		redisClient = redis.NewClient(&redis.Options{
 			Addr:     cfg.Redis.Addr,
 			Password: cfg.Redis.Password,
 			DB:       cfg.Redis.DB,
@@ -245,11 +248,20 @@ func main() {
 	fileHandler := filemodule.NewHandler(fileService)
 
 	shareRepo := sharemodule.NewRepository(db)
+	shareServiceOptions := []sharemodule.ServiceOption{
+		sharemodule.WithDownloadPolicy(fileService),
+		sharemodule.WithFileSaver(fileService),
+	}
+	if redisClient != nil {
+		shareServiceOptions = append(
+			shareServiceOptions,
+			sharemodule.WithAccessControl(sharemodule.NewRedisAccessControl(redisClient)),
+		)
+	}
 	shareService := sharemodule.NewService(
 		shareRepo,
 		objectStorage,
-		sharemodule.WithDownloadPolicy(fileService),
-		sharemodule.WithFileSaver(fileService),
+		shareServiceOptions...,
 	)
 	shareHandler := sharemodule.NewHandler(shareService)
 

@@ -15,9 +15,9 @@ Web 工作台的接口边界见 [项目概况.md](项目概况.md)。其中明�
 - 公开链接按 IP 限制下载频率；密码连续错误会临时锁定，并记录匿名化访问审计。
 - 管理员邀请码、账号状态、容量档位、临时密码和分享撤销管理；管理员不默认访问用户私有文件。
 - 持久化后台任务、文件完整性校验、缩略图和可选 ClamAV 病毒扫描。
-- 本地磁盘或 MinIO 对象存储；SQLite 或 PostgreSQL；可选 Redis 用量缓存。
+- 本地磁盘或 MinIO 对象存储；SQLite 或 PostgreSQL；可选 Redis 用量缓存和跨实例分享风控。
 - JSON 访问日志、Prometheus HTTP 指标、OpenTelemetry HTTP 链路追踪、GitHub Actions 和 Docker Compose。
-- React + TypeScript 文件工作台：邀请注册、文件与目录浏览、名称/类型/时间搜索、普通/分片上传与续传、回收站、分享链接、批量删除、合并分享、容量展示、图片预览和移动端媒体网格。
+- React + TypeScript 文件工作台：邀请注册、文件与目录浏览、名称/类型/时间搜索、普通/分片上传与续传、回收站、分享链接、批量删除、合并分享、容量展示、图片预览、相册视图和移动端媒体网格。
 
 ## 快速开始
 
@@ -65,6 +65,8 @@ npm run dev
 
 浏览器访问 `http://127.0.0.1:5173`。Vite 会把 `/api` 请求代理到本地 API 服务 `http://localhost:8080`，因此开发期间不需要配置跨域。
 
+需要将前端连接到其他开发 API 时，启动前设置 `VITE_API_TARGET`。例如：`VITE_API_TARGET=http://127.0.0.1:18080 npm run dev`。
+
 前端提供以下已接入的工作流：
 
 - 邀请注册、登录、JWT 会话保存和临时密码强制修改。
@@ -72,7 +74,7 @@ npm run dev
 - 小文件直接上传；大于 `5 MB` 的文件自动走分片初始化、逐块上传和合并完成接口。
 - 文件搜索、下载、回收站恢复/永久删除；选择多个文件后可批量移入回收站或创建一个合并分享链接。
 - 分享页支持单文件和多文件合并分享。公开访问者验证密码后可查看文件清单；登录后可逐个下载或一次保存全部文件到自己的目录。
-- 存储用量展示，以及使用鉴权请求读取图片缩略图。
+- 存储用量展示、列表与相册双视图，以及使用鉴权请求读取图片和视频封面。
 
 前端不伪造病毒扫描状态。扫描未完成时，下载或缩略图接口返回 `423`，前端会提示当前文件暂不可用；扫描未通过时按后端返回的 `403` 提示处理。文件详情中的“发起完整性校验”调用的是 `file.verify` 后台任务，不是病毒扫描任务。
 
@@ -106,7 +108,7 @@ npm run build
 | `MINIO_SECRET_KEY` | 空 | MinIO 密钥。 |
 | `MINIO_BUCKET` | `cloudbox` | MinIO bucket 名称。 |
 | `MINIO_USE_SSL` | `false` | 是否通过 HTTPS 访问 MinIO。 |
-| `REDIS_ENABLED` | `false` | 是否启用 Redis 存储用量缓存。 |
+| `REDIS_ENABLED` | `false` | 是否启用 Redis 存储用量缓存和公开分享访问控制。 |
 | `REDIS_ADDR` | `localhost:6379` | Redis 地址。 |
 | `REDIS_PASSWORD` | 空 | Redis 密码。 |
 | `REDIS_DB` | `0` | Redis 逻辑数据库编号，不能为负数。 |
@@ -185,7 +187,7 @@ curl http://localhost:8080/health
 
 ### Redis
 
-Redis 仅缓存 `GET /api/storage` 的用户已用空间。数据库仍是配额判断和数据查询的最终来源。Redis 未命中、缓存异常或 Redis 暂时不可用时，服务回退到数据库。
+Redis 缓存 `GET /api/storage` 的用户已用空间，并保存公开分享的短期访问控制状态：下载频率窗口和密码错误锁定。数据库仍是配额判断、文件数据、分享配置和访问审计的最终来源。
 
 ```bash
 docker compose -f compose.yaml -f compose.redis.yaml up --build -d
@@ -193,7 +195,7 @@ docker compose -f compose.yaml -f compose.redis.yaml ps
 curl http://localhost:8080/health
 ```
 
-Redis 不开放宿主机端口，仅供 Docker 网络内的 API 服务访问。上传和秒传成功后，服务删除对应用户的用量缓存；下一次用量查询重新从数据库计算。
+Redis 不开放宿主机端口，仅供 Docker 网络内的 API 服务访问。上传和秒传成功后，服务删除对应用户的用量缓存；下一次用量查询重新从数据库计算。启用 Redis 后，多个 API 实例共享同一份公开分享限速和密码锁定状态；Redis 不可用时，公开分享访问返回 `503 Service Unavailable`，不会绕过访问控制。
 
 组合使用 PostgreSQL 和 Redis：
 
@@ -207,13 +209,13 @@ docker compose \
 
 ### 生产部署
 
-生产配置使用 PostgreSQL、MinIO、Go API 和 Caddy。Caddy 托管前端静态资源、反向代理 API，并在域名解析和 80/443 端口可达时自动申请与续期 HTTPS 证书。
+生产配置使用 PostgreSQL、MinIO、Redis、Go API 和 Caddy。Caddy 托管前端静态资源、反向代理 API，并在域名解析和 80/443 端口可达时自动申请与续期 HTTPS 证书。
 
 部署前需要完成以下准备：
 
 1. 将域名的 A/AAAA 记录指向服务器。
 2. 在服务器防火墙放行 TCP `80` 和 `443`。
-3. 创建 `.env`，并设置 `CLOUDBOX_DOMAIN`、`JWT_SECRET`、PostgreSQL 与 MinIO 的强随机密码。生产环境不要保留 `.env.example` 中的示例值。
+3. 创建 `.env`，并设置 `CLOUDBOX_DOMAIN`、`JWT_SECRET`、PostgreSQL、MinIO 与 Redis 的强随机密码。生产环境不要保留 `.env.example` 中的示例值。
 4. 确认服务器已安装 Docker Engine 和 Docker Compose 插件。
 
 启动：
@@ -230,7 +232,25 @@ curl -f https://$CLOUDBOX_DOMAIN/health
 docker compose -f compose.production.yaml ps
 ```
 
-生产配置只公开 Caddy 的 `80/443`。PostgreSQL、MinIO 和 API 仅在 Compose 内部网络可见；不要为了排障直接暴露它们的端口。数据保存在命名 volume 中，升级前应备份 PostgreSQL 数据库和 MinIO 数据卷。
+生产配置只公开 Caddy 的 `80/443`。PostgreSQL、MinIO、Redis 和 API 仅在 Compose 内部网络可见；不要为了排障直接暴露它们的端口。
+
+### 生产备份与恢复
+
+在升级或迁移前，执行备份。备份脚本需要当前目录存在生产 `.env`，并导出 PostgreSQL 元数据和 MinIO 对象数据。Redis 只保存缓存与短期访问控制状态，不纳入备份。
+
+```bash
+./scripts/backup-production.sh
+```
+
+脚本在 `backups/<UTC 时间戳>/` 生成 `postgres.dump`、`minio-data.tar.gz` 和 `SHA256SUMS`。将整个目录复制到独立于服务器的安全位置。
+
+恢复会停止生产服务，并覆盖 PostgreSQL 和 MinIO 数据。恢复前确认备份目录和目标服务器无误：
+
+```bash
+./scripts/restore-production.sh backups/<UTC 时间戳>
+docker compose -f compose.production.yaml ps
+curl -f https://$CLOUDBOX_DOMAIN/health
+```
 
 停止服务：
 
@@ -325,13 +345,13 @@ POST /api/uploads/:id/complete
 
 ### 公开分享保护
 
-公开分享的下载和保存副本按分享 token 与匿名化 IP 分别限速：单 IP 最多 20 次/分钟。密码连续错误 5 次后，该 IP 在该分享上锁定 10 分钟。系统审计 token、匿名化 IP、动作、结果和时间，不记录原始 IP。
+公开分享的下载和保存副本按分享 token 与匿名化 IP 分别限速：单 IP 最多 20 次/分钟。密码连续错误 5 次后，该 IP 在该分享上锁定 10 分钟。系统审计 token、匿名化 IP、动作、结果和时间，不记录原始 IP。Redis 启用时，多个 API 实例共享限速和锁定状态。
 
 合并分享为至少两个同一所有者的活跃文件创建一个统一链接，并共享密码、有效期和下载次数上限。访问者通过验证后只能查看该链接内的文件清单；每下载一个文件都会消耗一次该链接的下载额度。任意源文件移入回收站后，整个合并链接立即失效，避免链接继续暴露不完整的文件集合。
 
 登录用户可将合并分享中的全部文件保存为自己的文件记录。保存前会统一检查目标目录和总逻辑容量；创建记录与对象引用计数在同一个事务中完成。容量不足或任一数据库操作失败时，不会保存任何文件，并会回退本次预留的下载次数。
 
-限制状态目前保存在 API 进程内，适合单实例部署。后续部署多个 API 实例时，应改用 Redis 等共享存储保存限速和锁定状态。
+Redis 未启用时，限制状态保存在 API 进程内，适合本地单实例开发。生产 Compose 默认启用 Redis，用于多实例共享访问控制状态。
 
 ## 后台任务和缩略图
 
@@ -340,10 +360,10 @@ POST /api/uploads/:id/complete
 任务类型：
 
 - `file.verify`：流式重新计算 SHA-256。
-- `file.thumbnail`：为 JPEG、PNG、GIF 生成最长边 `320 px` 的 PNG 缩略图。GIF 仅处理第一帧；超过 `40,000,000` 像素的源图片会被拒绝。
+- `file.thumbnail`：为 JPEG、PNG、GIF、WebP 生成最长边 `320 px` 的 PNG 缩略图；GIF 仅处理第一帧。视频通过 `ffmpeg` 提取首个可解码帧，并生成最长边 `320 px` 的 PNG 封面。超过 `40,000,000` 像素的源图片会被拒绝。
 - `file.scan`：通过 clamd INSTREAM 协议执行病毒扫描。
 
-缩略图属于 `file_object`，相同内容的去重文件共享一份缩略图。缩略图尚未生成、文件不支持预览、文件已删除或文件不属于当前用户时，`GET /api/files/:id/thumbnail` 返回 `404 Not Found`。
+缩略图属于 `file_object`，相同内容的去重文件共享一份缩略图。生产镜像内置 `ffmpeg`。本地运行缺少 `ffmpeg` 时，视频保留为可下载文件且不生成封面；缩略图任务不会阻塞上传。缩略图尚未生成、文件不支持预览、文件已删除或文件不属于当前用户时，`GET /api/files/:id/thumbnail` 返回 `404 Not Found`。
 
 ## 病毒扫描
 

@@ -109,17 +109,28 @@ func WithVirusScanTimeout(timeout time.Duration) ServiceOption {
 	}
 }
 
+// WithVideoThumbnailExtractor replaces the ffmpeg-backed frame extractor.
+// Tests use it to avoid depending on a local media tool installation.
+func WithVideoThumbnailExtractor(extractor VideoThumbnailExtractor) ServiceOption {
+	return func(service *Service) {
+		if extractor != nil {
+			service.videoThumbnailExtractor = extractor
+		}
+	}
+}
+
 type Service struct {
-	repo                 *Repository
-	storage              Storage
-	storageQuotaBytes    int64
-	storageUsageCache    StorageUsageCache
-	storageUsageCacheTTL time.Duration
-	storageQuotaProvider StorageQuotaProvider
-	trashRetention       time.Duration
-	jobEnqueuer          JobEnqueuer
-	virusScanner         scanner.Scanner
-	virusScanTimeout     time.Duration
+	repo                    *Repository
+	storage                 Storage
+	storageQuotaBytes       int64
+	storageUsageCache       StorageUsageCache
+	storageUsageCacheTTL    time.Duration
+	storageQuotaProvider    StorageQuotaProvider
+	trashRetention          time.Duration
+	jobEnqueuer             JobEnqueuer
+	virusScanner            scanner.Scanner
+	virusScanTimeout        time.Duration
+	videoThumbnailExtractor VideoThumbnailExtractor
 }
 
 func NewService(
@@ -129,9 +140,10 @@ func NewService(
 	options ...ServiceOption,
 ) *Service {
 	service := &Service{
-		repo:              repo,
-		storage:           storage,
-		storageQuotaBytes: storageQuotaBytes,
+		repo:                    repo,
+		storage:                 storage,
+		storageQuotaBytes:       storageQuotaBytes,
+		videoThumbnailExtractor: NewFFmpegVideoThumbnailExtractor(),
 	}
 
 	for _, option := range options {

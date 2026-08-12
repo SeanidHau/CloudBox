@@ -3,12 +3,14 @@ package file
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"image"
 	"image/color"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -20,6 +22,20 @@ import (
 	"github.com/SeanidHau/CloudBox/internal/scanner"
 	"github.com/gin-gonic/gin"
 )
+
+type fakeVideoThumbnailExtractor struct {
+	content []byte
+	err     error
+	calls   int
+}
+
+func (e *fakeVideoThumbnailExtractor) ExtractFirstFrame(_ context.Context, source io.Reader) ([]byte, error) {
+	e.calls++
+	if _, err := io.ReadAll(source); err != nil {
+		return nil, err
+	}
+	return e.content, e.err
+}
 
 func TestGenerateThumbnailForActiveFileDecodesAndScalesImages(t *testing.T) {
 	for _, test := range []struct {
@@ -109,6 +125,57 @@ func TestGenerateThumbnailForActiveFileRejectsUnsupportedContentType(t *testing.
 func TestSupportsThumbnailIncludesWebP(t *testing.T) {
 	if !SupportsThumbnail("image/webp") {
 		t.Fatal("WebP should be supported for thumbnail generation")
+	}
+}
+
+func TestGenerateThumbnailForActiveFileExtractsVideoFirstFrame(t *testing.T) {
+	storage := &fakeStorage{}
+	frame := encodeTestImage(t, "image/png", image.NewRGBA(image.Rect(0, 0, 320, 180)))
+	extractor := &fakeVideoThumbnailExtractor{content: frame}
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		storage,
+		testStorageQuotaBytes,
+		WithVideoThumbnailExtractor(extractor),
+	)
+
+	uploaded, err := service.Upload(1, "travel.mp4", "video/mp4", strings.NewReader("video bytes"))
+	if err != nil {
+		t.Fatalf("upload video: %v", err)
+	}
+	if err := service.GenerateThumbnailForActiveFile(context.Background(), uploaded.ID); err != nil {
+		t.Fatalf("generate video thumbnail: %v", err)
+	}
+	if extractor.calls != 1 {
+		t.Fatalf("video extractor calls = %d, want 1", extractor.calls)
+	}
+	preview, err := service.repo.FindFilePreviewForActiveFile(1, uploaded.ID)
+	if err != nil {
+		t.Fatalf("find generated video thumbnail: %v", err)
+	}
+	if preview.Width != 320 || preview.Height != 180 || preview.ContentType != "image/png" {
+		t.Fatalf("video preview = %#v, want 320x180 PNG", preview)
+	}
+}
+
+func TestVideoThumbnailJobIgnoresUnavailableFFmpeg(t *testing.T) {
+	storage := &fakeStorage{}
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		storage,
+		testStorageQuotaBytes,
+		WithVideoThumbnailExtractor(&fakeVideoThumbnailExtractor{err: ErrVideoThumbnailUnavailable}),
+	)
+	uploaded, err := service.Upload(1, "travel.mp4", "video/mp4", strings.NewReader("video bytes"))
+	if err != nil {
+		t.Fatalf("upload video: %v", err)
+	}
+	encoded, err := json.Marshal(ThumbnailPayload{FileID: uploaded.ID})
+	if err != nil {
+		t.Fatalf("marshal thumbnail payload: %v", err)
+	}
+	if err := NewThumbnailJobHandler(service)(context.Background(), jobmodule.Job{Payload: encoded}); err != nil {
+		t.Fatalf("unavailable video thumbnail generator error = %v, want success", err)
 	}
 }
 

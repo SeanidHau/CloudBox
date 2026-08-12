@@ -19,7 +19,9 @@ import {
   FolderPlus,
   HardDrive,
   ImageOff,
+  Images,
   LayoutGrid,
+  List,
   Link,
   LoaderCircle,
   LogOut,
@@ -384,6 +386,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selected, setSelected] = useState<SelectedItem>(null);
+  const [contentView, setContentView] = useState<"list" | "album">("list");
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedFileIDs, setSelectedFileIDs] = useState<Set<number>>(() => new Set());
   const [search, setSearch] = useState("");
@@ -433,8 +436,18 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     queryFn: () => api.searchFiles({ query: search.trim() || undefined, kind: searchKind || undefined, ...searchRange }),
     enabled: isSearching
   });
+  const albumImagesQuery = useQuery({
+    queryKey: ["album-media", "image"],
+    queryFn: () => api.searchFiles({ kind: "image" }),
+    enabled: view === "files" && contentView === "album"
+  });
+  const albumVideosQuery = useQuery({
+    queryKey: ["album-media", "video"],
+    queryFn: () => api.searchFiles({ kind: "video" }),
+    enabled: view === "files" && contentView === "album"
+  });
 
-  useEffect(() => { setSelected(null); setSelectionMode(false); setSelectedFileIDs(new Set()); }, [location.pathname, parentID]);
+  useEffect(() => { setSelected(null); setSelectionMode(false); setSelectedFileIDs(new Set()); }, [location.pathname, parentID, contentView]);
   useEffect(() => {
     if (!toast) return undefined;
     const timer = window.setTimeout(() => setToast(null), 4200);
@@ -479,9 +492,14 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     ...filteredFolders.map((value) => ({ type: "folder" as const, value })),
     ...filteredFiles.map((value) => ({ type: "file" as const, value }))
   ], [filteredFiles, filteredFolders]);
+  const albumFiles = useMemo(() => [
+    ...(albumImagesQuery.data?.files ?? []),
+    ...(albumVideosQuery.data?.files ?? [])
+  ].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)), [albumImagesQuery.data?.files, albumVideosQuery.data?.files]);
+  const selectionFiles = contentView === "album" ? albumFiles : files;
   const previewableImages = useMemo(() => files.filter(isInlinePreviewable), [files]);
-  const isLoading = (view === "files" && (isSearching ? searchQuery.isLoading : filesQuery.isLoading || foldersQuery.isLoading)) || (view === "trash" && trashQuery.isLoading) || (view === "shares" && sharesQuery.isLoading);
-  const loadError = view === "files" ? isSearching ? searchQuery.error : filesQuery.error ?? foldersQuery.error : view === "trash" ? trashQuery.error : sharesQuery.error;
+  const isLoading = (view === "files" && (contentView === "album" ? albumImagesQuery.isLoading || albumVideosQuery.isLoading : isSearching ? searchQuery.isLoading : filesQuery.isLoading || foldersQuery.isLoading)) || (view === "trash" && trashQuery.isLoading) || (view === "shares" && sharesQuery.isLoading);
+  const loadError = view === "files" ? contentView === "album" ? albumImagesQuery.error ?? albumVideosQuery.error : isSearching ? searchQuery.error : filesQuery.error ?? foldersQuery.error : view === "trash" ? trashQuery.error : sharesQuery.error;
 
   function invalidateWorkspace() {
     void queryClient.invalidateQueries({ queryKey: ["files"] });
@@ -491,6 +509,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     void queryClient.invalidateQueries({ queryKey: ["shares"] });
     void queryClient.invalidateQueries({ queryKey: ["share-collections"] });
     void queryClient.invalidateQueries({ queryKey: ["file-search"] });
+    void queryClient.invalidateQueries({ queryKey: ["album-media"] });
   }
 
   function show(message: string, tone: NonNullable<Toast>["tone"] = "success") {
@@ -589,7 +608,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   }
 
   async function removeSelectedFiles() {
-    const selectedFiles = files.filter((file) => selectedFileIDs.has(file.id));
+    const selectedFiles = selectionFiles.filter((file) => selectedFileIDs.has(file.id));
     if (selectedFiles.length === 0) return;
     if (!window.confirm(`将选中的 ${selectedFiles.length} 个文件移入回收站，并撤销它们的分享链接？`)) return;
     try {
@@ -677,7 +696,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     navigate("/login", { replace: true });
   }
 
-  const currentTitle = view === "trash" ? "回收站" : view === "shares" ? "分享链接" : view === "settings" ? "设置" : isSearching ? "搜索结果" : parentID ? folderNames.at(-1) || "当前文件夹" : "我的文件";
+  const currentTitle = view === "trash" ? "回收站" : view === "shares" ? "分享链接" : view === "settings" ? "设置" : contentView === "album" ? "相册" : isSearching ? "搜索结果" : parentID ? folderNames.at(-1) || "当前文件夹" : "我的文件";
 
   return (
     <div className="workspace-shell">
@@ -708,7 +727,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
             </> : <span className="topbar-context">{currentTitle}</span>}
           </div>
           <div className={`topbar-actions ${view === "files" ? "with-search" : ""}`}>
-            {view === "files" && <label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索全部文件" /></label>}
+            {view === "files" && contentView === "list" && <label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索全部文件" /></label>}
             <button type="button" className="icon-button" title="帮助" aria-label="打开帮助" aria-expanded={helpOpen} onClick={() => { setHelpOpen(true); setAccountMenuOpen(false); }}><CircleHelp size={19} /></button>
             <div className="account-menu-wrap" ref={accountMenuRef}>
               <button type="button" className="user-button" title={`当前用户：${session.username}`} aria-label="打开账户菜单" aria-expanded={accountMenuOpen} onClick={() => { setAccountMenuOpen((open) => !open); setHelpOpen(false); }}><span>{session.username.slice(0, 1).toUpperCase()}</span></button>
@@ -723,8 +742,12 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
 
         <section className="content-area">
           <div className="page-heading">
-            <div><p className="eyebrow">WORKSPACE</p>{view === "files" && parentID && <button type="button" className="back-button" onClick={goUp}><ArrowLeft size={16} />返回上一级</button>}<h1>{currentTitle}</h1></div>
+            <div><p className="eyebrow">WORKSPACE</p>{view === "files" && contentView === "list" && parentID && <button type="button" className="back-button" onClick={goUp}><ArrowLeft size={16} />返回上一级</button>}<h1>{currentTitle}</h1></div>
             {view === "files" && <div className="heading-actions">
+              <div className="view-switch" role="group" aria-label="文件展示方式">
+                <button type="button" className={contentView === "list" ? "active" : ""} title="列表视图" onClick={() => setContentView("list")}><List size={16} />列表</button>
+                <button type="button" className={contentView === "album" ? "active" : ""} title="相册视图" onClick={() => setContentView("album")}><Images size={16} />相册</button>
+              </div>
               <button type="button" className="secondary-button" onClick={() => selectionMode ? closeSelectionMode() : setSelectionMode(true)}>{selectionMode ? <X size={17} /> : <CheckSquare size={17} />}{selectionMode ? "取消选择" : "选择"}</button>
               <button type="button" className="secondary-button" onClick={() => setDialog("folder")}><FolderPlus size={17} />新建文件夹</button>
               <button type="button" className="primary-button" onClick={() => setDialog("upload")}><Upload size={17} />上传文件</button>
@@ -734,7 +757,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
             </div>}
           </div>
 
-          {view === "files" && <div className="search-filters" aria-label="搜索筛选">
+          {view === "files" && contentView === "list" && <div className="search-filters" aria-label="搜索筛选">
             <span>筛选</span>
             <select value={searchKind} onChange={(event) => setSearchKind(event.target.value as typeof searchKind)} aria-label="文件类型">
               <option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option><option value="other">其他</option>
@@ -752,6 +775,20 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
               if (!window.confirm("撤销该分享链接？")) return;
               try { await api.revokeShare(share.token); invalidateWorkspace(); show("分享链接已撤销"); } catch (err) { show(messageOf(err), "error"); }
             }} onRevokeCollection={async (share) => { if (!window.confirm("撤销这组文件的分享链接？")) return; try { await api.revokeShareCollection(share.token); invalidateWorkspace(); show("多文件分享链接已撤销"); } catch (err) { show(messageOf(err), "error"); } }} />
+          ) : contentView === "album" ? (
+            <div className={`file-layout album-layout ${selected ? "details-open" : ""}`}>
+              <section className="file-surface album-surface">
+                <div className="file-table-wrap">
+                  <div className="section-label">所有媒体 <span>{albumFiles.length}</span></div>
+                  {selectionMode && <div className="selection-bar"><span>已选 {selectedFileIDs.size} 项</span><div><button className="secondary-button compact" type="button" onClick={() => setSelectedFileIDs(new Set(albumFiles.map((file) => file.id)))}>全选媒体</button><button className="secondary-button compact" type="button" onClick={() => setDialog("share-collection")} disabled={selectedFileIDs.size < 2}><Share2 size={16} />合并分享</button><button className="danger-button compact" type="button" onClick={() => void removeSelectedFiles()} disabled={selectedFileIDs.size === 0}><Trash2 size={16} />移入回收站</button></div></div>}
+                  {isLoading && <LoadingRows />}
+                  {loadError && <div className="empty-state error-state"><p>无法加载媒体</p><span>{messageOf(loadError)}</span></div>}
+                  {!isLoading && !loadError && albumFiles.length === 0 && <div className="empty-state"><Images size={28} /><p>还没有照片或视频</p><span>上传媒体后会按创建时间显示在这里。</span></div>}
+                  {!isLoading && !loadError && albumFiles.length > 0 && <MediaAlbum files={albumFiles} selecting={selectionMode} selectedFileIDs={selectedFileIDs} onToggle={toggleFileSelection} onSelect={(file) => setSelected({ type: "file", value: file })} onPreview={setImageViewer} />}
+                </div>
+              </section>
+              {selected && <DetailPanel selected={selected} trash={false} onClose={() => setSelected(null)} onDownload={() => selected.type === "file" && void downloadFile(selected.value)} onDelete={() => selected.type === "file" ? void removeFile(selected.value) : void removeFolder(selected.value)} onRestore={() => undefined} onRename={() => setDialog("rename")} onMove={() => setDialog("move")} onShare={() => setDialog("share")} onPreview={() => selected.type === "file" && isInlinePreviewable(selected.value) && setImageViewer(selected.value)} />}
+            </div>
           ) : (
             <div className={`file-layout ${view} ${selected ? "details-open" : ""}`}>
               <section className="file-surface" onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); void handleUpload(event.dataTransfer.files); }}>
@@ -809,7 +846,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
           invalidateWorkspace(); setDialog(null); show("分享链接已创建并复制到剪贴板");
         } catch (err) { show(messageOf(err), "error"); }
       }} />}
-      {dialog === "share-collection" && <ShareCollectionDialog files={files.filter((file) => selectedFileIDs.has(file.id))} onClose={() => setDialog(null)} onSubmit={async (data) => {
+      {dialog === "share-collection" && <ShareCollectionDialog files={selectionFiles.filter((file) => selectedFileIDs.has(file.id))} onClose={() => setDialog(null)} onSubmit={async (data) => {
         try { const { share } = await api.createShareCollection(data); await navigator.clipboard.writeText(publicCollectionShareURL(share.token)); closeSelectionMode(); invalidateWorkspace(); setDialog(null); show("多文件分享链接已创建并复制到剪贴板"); } catch (err) { show(messageOf(err), "error"); }
       }} />}
       {dialog === "save-share" && <SaveShareDialog folders={rootFoldersQuery.data?.folders ?? []} onClose={() => setDialog(null)} onSubmit={async (data) => {
@@ -859,7 +896,7 @@ function DetailPanel({ selected, trash, onClose, onDownload, onDelete, onRestore
   const accessible = file?.availability === "ready";
   const [preview, setPreview] = useState<string | null>(null);
   useEffect(() => {
-    if (!file?.content_type.startsWith("image/")) { setPreview(null); return undefined; }
+    if (!file || !isThumbnailSupported(file)) { setPreview(null); return undefined; }
     let objectURL: string | null = null;
     void api.thumbnail(file.id).then((blob) => { objectURL = URL.createObjectURL(blob); setPreview(objectURL); }).catch(() => setPreview(null));
     return () => { if (objectURL) URL.revokeObjectURL(objectURL); };
@@ -895,6 +932,32 @@ function MediaGrid({ entries, selecting, selectedFileIDs, onToggle, onOpenFolder
     const file = folder ? null : entry.value;
     return <MediaTile key={`mobile-${entry.type}-${entry.value.id}`} entry={entry} selecting={selecting && !folder} checked={!folder && selectedFileIDs.has(entry.value.id)} onToggle={onToggle} onOpenFolder={onOpenFolder} onSelect={onSelect} onPreview={onPreview} />;
   })}</div>;
+}
+
+function MediaAlbum({ files, selecting, selectedFileIDs, onToggle, onSelect, onPreview }: { files: UserFile[]; selecting: boolean; selectedFileIDs: Set<number>; onToggle: (fileID: number) => void; onSelect: (file: UserFile) => void; onPreview: (file: UserFile) => void }) {
+  return <div className="media-album">{files.map((file) => <AlbumTile key={file.id} file={file} selecting={selecting} checked={selectedFileIDs.has(file.id)} onToggle={onToggle} onSelect={onSelect} onPreview={onPreview} />)}</div>;
+}
+
+function AlbumTile({ file, selecting, checked, onToggle, onSelect, onPreview }: { file: UserFile; selecting: boolean; checked: boolean; onToggle: (fileID: number) => void; onSelect: (file: UserFile) => void; onPreview: (file: UserFile) => void }) {
+  const [thumbnail, setThumbnail] = useState<string | null>(null);
+  const isVideo = file.content_type.startsWith("video/");
+  const canPreview = isInlinePreviewable(file);
+
+  useEffect(() => {
+    if (!isThumbnailSupported(file)) { setThumbnail(null); return undefined; }
+    let objectURL: string | null = null;
+    void api.thumbnail(file.id).then((blob) => {
+      objectURL = URL.createObjectURL(blob);
+      setThumbnail(objectURL);
+    }).catch(() => setThumbnail(null));
+    return () => { if (objectURL) URL.revokeObjectURL(objectURL); };
+  }, [file.id, file.content_type, file.availability]);
+
+  return <button type="button" className={`album-tile ${selecting ? "is-selecting" : ""} ${checked ? "is-checked" : ""}`} onClick={() => selecting ? onToggle(file.id) : canPreview ? onPreview(file) : onSelect(file)}>
+    {selecting && <span className="tile-select" aria-hidden="true">{checked ? <CheckSquare size={20} /> : <Square size={20} />}</span>}
+    <span className="album-visual">{thumbnail ? <img src={thumbnail} alt="" /> : <FileKindIcon file={file} size={34} />}{isVideo && <span className="video-badge"><FileVideo size={13} />视频</span>}</span>
+    <span className="album-copy"><strong>{file.original_name}</strong><small>{formatDate(file.created_at)} · {formatBytes(file.size)}</small></span>
+  </button>;
 }
 
 function MediaTile({ entry, selecting, checked, onToggle, onOpenFolder, onSelect, onPreview }: { entry: DirectoryEntry; selecting: boolean; checked: boolean; onToggle: (fileID: number) => void; onOpenFolder: (folder: FolderType) => void; onSelect: (entry: DirectoryEntry) => void; onPreview: (file: UserFile) => void }) {
@@ -1130,7 +1193,7 @@ function isInlinePreviewable(file: UserFile) {
 }
 
 function isThumbnailSupported(file: UserFile) {
-  return file.availability === "ready" && ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.content_type);
+	return file.availability === "ready" && (file.content_type.startsWith("image/") || file.content_type.startsWith("video/"));
 }
 function usagePercent(usage: StorageUsage | undefined) { if (!usage?.quota_bytes) return 0; return Math.min(Math.round((usage.used_bytes / usage.quota_bytes) * 100), 100); }
 function messageOf(error: unknown) { return error instanceof Error ? error.message : "发生未知错误"; }

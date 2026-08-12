@@ -19,12 +19,17 @@ services:
       TRASH_RETENTION_HOURS: ${TRASH_RETENTION_HOURS:-720}
       JOB_WORKER_COUNT: ${JOB_WORKER_COUNT:-1}
       JOB_POLL_INTERVAL_MILLISECONDS: ${JOB_POLL_INTERVAL_MILLISECONDS:-1000}
+      REDIS_ENABLED: "true"
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
     volumes:
       - cloudbox-api-data:/data
     depends_on:
       postgres:
         condition: service_healthy
       minio:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
 
@@ -73,9 +78,29 @@ services:
       retries: 20
     restart: unless-stopped
 
+  redis:
+    image: redis:7.4-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
 volumes:
   cloudbox-api-data:
   postgres-data:
   minio-data:
+  redis-data:
   caddy-data:
   caddy-config:

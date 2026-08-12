@@ -13,17 +13,18 @@ import (
 )
 
 var (
-	ErrShareExpirationInvalid = errors.New("share expiration must be in the future")
-	ErrDownloadLimitInvalid   = errors.New("download limit must be greater than zero")
-	ErrShareExpired           = errors.New("share has expired")
-	ErrSharePasswordRequired  = errors.New("share password is required")
-	ErrSharePasswordInvalid   = errors.New("share password is invalid")
-	ErrDownloadLimitReached   = errors.New("share download limit reached")
-	ErrSharedFileUnavailable  = errors.New("shared file is unavailable")
-	ErrShareSaveUnavailable   = errors.New("shared file save is unavailable")
-	ErrSharePasswordLocked    = errors.New("share password attempts are temporarily locked")
-	ErrShareDownloadRateLimit = errors.New("share download rate limit reached")
-	ErrShareCollectionEmpty   = errors.New("share collection requires at least two files")
+	ErrShareExpirationInvalid        = errors.New("share expiration must be in the future")
+	ErrDownloadLimitInvalid          = errors.New("download limit must be greater than zero")
+	ErrShareExpired                  = errors.New("share has expired")
+	ErrSharePasswordRequired         = errors.New("share password is required")
+	ErrSharePasswordInvalid          = errors.New("share password is invalid")
+	ErrDownloadLimitReached          = errors.New("share download limit reached")
+	ErrSharedFileUnavailable         = errors.New("shared file is unavailable")
+	ErrShareSaveUnavailable          = errors.New("shared file save is unavailable")
+	ErrSharePasswordLocked           = errors.New("share password attempts are temporarily locked")
+	ErrShareDownloadRateLimit        = errors.New("share download rate limit reached")
+	ErrShareAccessControlUnavailable = errors.New("share access control is temporarily unavailable")
+	ErrShareCollectionEmpty          = errors.New("share collection requires at least two files")
 )
 
 const DefaultShareLifetime = 7 * 24 * time.Hour
@@ -76,7 +77,7 @@ func WithFileSaver(saver FileSaver) ServiceOption {
 	}
 }
 
-func WithAccessControl(control *AccessControl) ServiceOption {
+func WithAccessControl(control AccessController) ServiceOption {
 	return func(service *Service) {
 		if control != nil {
 			service.accessControl = control
@@ -97,7 +98,7 @@ type Service struct {
 	storage        Storage
 	downloadPolicy DownloadPolicy
 	fileSaver      FileSaver
-	accessControl  *AccessControl
+	accessControl  AccessController
 	auditor        AccessAuditor
 }
 
@@ -257,7 +258,11 @@ func (s *Service) OpenCollectionFileForDownloadFromIP(token string, fileID int64
 			return nil, nil, fmt.Errorf("%w: %v", ErrSharedFileUnavailable, err)
 		}
 	}
-	if !s.accessControl.AllowDownload(token, ipHash) {
+	allowed, err := s.accessControl.AllowDownload(token, ipHash)
+	if err != nil {
+		return nil, nil, s.accessControlError(err)
+	}
+	if !allowed {
 		_ = s.audit(token, ipHash, AccessDownload, AccessRateLimited)
 		return nil, nil, ErrShareDownloadRateLimit
 	}
@@ -311,7 +316,11 @@ func (s *Service) SaveCollectionToUserFilesFromIP(userID int64, token string, pa
 			}
 		}
 	}
-	if !s.accessControl.AllowDownload(token, ipHash) {
+	allowed, err := s.accessControl.AllowDownload(token, ipHash)
+	if err != nil {
+		return nil, s.accessControlError(err)
+	}
+	if !allowed {
 		_ = s.audit(token, ipHash, AccessSave, AccessRateLimited)
 		return nil, ErrShareDownloadRateLimit
 	}
@@ -344,7 +353,11 @@ func (s *Service) SaveCollectionToUserFilesFromIP(userID int64, token string, pa
 }
 
 func (s *Service) findAccessibleCollection(token string, password string, ipHash string) (*CollectionShare, error) {
-	if s.accessControl.PasswordLocked(token, ipHash) {
+	locked, err := s.accessControl.PasswordLocked(token, ipHash)
+	if err != nil {
+		return nil, s.accessControlError(err)
+	}
+	if locked {
 		return nil, ErrSharePasswordLocked
 	}
 	share, err := s.repo.FindCollectionByToken(token)
@@ -359,11 +372,15 @@ func (s *Service) findAccessibleCollection(token string, password string, ipHash
 			return nil, ErrSharePasswordRequired
 		}
 		if err := bcrypt.CompareHashAndPassword([]byte(share.PasswordHash), []byte(password)); err != nil {
-			s.accessControl.RecordPasswordFailure(token, ipHash)
+			if controlErr := s.accessControl.RecordPasswordFailure(token, ipHash); controlErr != nil {
+				return nil, s.accessControlError(controlErr)
+			}
 			return nil, ErrSharePasswordInvalid
 		}
 	}
-	s.accessControl.ClearPasswordFailures(token, ipHash)
+	if err := s.accessControl.ClearPasswordFailures(token, ipHash); err != nil {
+		return nil, s.accessControlError(err)
+	}
 	return share, nil
 }
 
@@ -455,7 +472,11 @@ func (s *Service) OpenForDownloadFromIP(
 		_ = s.audit(token, ipHash, AccessDownload, accessResult(err))
 		return nil, nil, err
 	}
-	if !s.accessControl.AllowDownload(token, ipHash) {
+	allowed, err := s.accessControl.AllowDownload(token, ipHash)
+	if err != nil {
+		return nil, nil, s.accessControlError(err)
+	}
+	if !allowed {
 		_ = s.audit(token, ipHash, AccessDownload, AccessRateLimited)
 		return nil, nil, ErrShareDownloadRateLimit
 	}
@@ -497,7 +518,11 @@ func (s *Service) OpenForDownloadFromIP(
 }
 
 func (s *Service) findAccessibleFile(token string, password string, requireDownloadSlot bool, ipHash string) (*SharedFile, error) {
-	if s.accessControl.PasswordLocked(token, ipHash) {
+	locked, err := s.accessControl.PasswordLocked(token, ipHash)
+	if err != nil {
+		return nil, s.accessControlError(err)
+	}
+	if locked {
 		return nil, ErrSharePasswordLocked
 	}
 	share, err := s.repo.FindByToken(token)
@@ -507,11 +532,15 @@ func (s *Service) findAccessibleFile(token string, password string, requireDownl
 
 	if err := validateShareAccess(share, password, requireDownloadSlot); err != nil {
 		if errors.Is(err, ErrSharePasswordInvalid) {
-			s.accessControl.RecordPasswordFailure(token, ipHash)
+			if controlErr := s.accessControl.RecordPasswordFailure(token, ipHash); controlErr != nil {
+				return nil, s.accessControlError(controlErr)
+			}
 		}
 		return nil, err
 	}
-	s.accessControl.ClearPasswordFailures(token, ipHash)
+	if err := s.accessControl.ClearPasswordFailures(token, ipHash); err != nil {
+		return nil, s.accessControlError(err)
+	}
 
 	file, err := s.repo.FindActiveFileByShareToken(token)
 	if err != nil {
@@ -554,18 +583,26 @@ func (s *Service) SaveToUserFilesFromIP(
 		_ = s.audit(token, ipHash, AccessSave, AccessDenied)
 		return nil, err
 	}
-	if s.accessControl.PasswordLocked(token, ipHash) {
+	locked, err := s.accessControl.PasswordLocked(token, ipHash)
+	if err != nil {
+		return nil, s.accessControlError(err)
+	}
+	if locked {
 		_ = s.audit(token, ipHash, AccessSave, AccessLocked)
 		return nil, ErrSharePasswordLocked
 	}
 	if err := validateShareAccess(share, password, true); err != nil {
 		if errors.Is(err, ErrSharePasswordInvalid) {
-			s.accessControl.RecordPasswordFailure(token, ipHash)
+			if controlErr := s.accessControl.RecordPasswordFailure(token, ipHash); controlErr != nil {
+				return nil, s.accessControlError(controlErr)
+			}
 		}
 		_ = s.audit(token, ipHash, AccessSave, accessResult(err))
 		return nil, err
 	}
-	s.accessControl.ClearPasswordFailures(token, ipHash)
+	if err := s.accessControl.ClearPasswordFailures(token, ipHash); err != nil {
+		return nil, s.accessControlError(err)
+	}
 
 	sharedFile, err := s.repo.FindActiveFileByShareToken(token)
 	if err != nil {
@@ -578,7 +615,11 @@ func (s *Service) SaveToUserFilesFromIP(
 			return nil, fmt.Errorf("%w: %v", ErrSharedFileUnavailable, err)
 		}
 	}
-	if !s.accessControl.AllowDownload(token, ipHash) {
+	allowed, err := s.accessControl.AllowDownload(token, ipHash)
+	if err != nil {
+		return nil, s.accessControlError(err)
+	}
+	if !allowed {
 		_ = s.audit(token, ipHash, AccessSave, AccessRateLimited)
 		return nil, ErrShareDownloadRateLimit
 	}
@@ -620,6 +661,10 @@ func (s *Service) audit(token string, ipHash string, action AccessAction, result
 		return nil
 	}
 	return s.auditor.RecordShareAccess(AccessAudit{Token: token, IPHash: ipHash, Action: action, Result: result})
+}
+
+func (s *Service) accessControlError(err error) error {
+	return fmt.Errorf("%w: %v", ErrShareAccessControlUnavailable, err)
 }
 
 func accessResult(err error) AccessResult {
