@@ -49,6 +49,14 @@ type fakeStorageUsageCache struct {
 	lastTTL     time.Duration
 }
 
+type fakeStorageQuotaProvider struct {
+	quotas map[int64]int64
+}
+
+func (p fakeStorageQuotaProvider) StorageQuotaBytes(userID int64) (int64, error) {
+	return p.quotas[userID], nil
+}
+
 const testStorageQuotaBytes int64 = 1 << 30
 
 func (r fakeReadSeekCloser) Close() error {
@@ -351,6 +359,29 @@ func TestServiceGetStorageUsage(t *testing.T) {
 	}
 	if usage.AvailableBytes != testStorageQuotaBytes-11 {
 		t.Fatalf("available bytes = %d, want %d", usage.AvailableBytes, testStorageQuotaBytes-11)
+	}
+}
+
+func TestServiceUsesPerUserStorageQuota(t *testing.T) {
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		&fakeStorage{},
+		100,
+		WithStorageQuotaProvider(fakeStorageQuotaProvider{quotas: map[int64]int64{1: 5, 2: 10}}),
+	)
+
+	if err := service.EnsureStorageQuota(1, 6); !errors.Is(err, ErrStorageQuotaExceeded) {
+		t.Fatalf("user one quota error = %v, want %v", err, ErrStorageQuotaExceeded)
+	}
+	if err := service.EnsureStorageQuota(2, 6); err != nil {
+		t.Fatalf("user two quota error = %v, want success", err)
+	}
+	usage, err := service.GetStorageUsage(1)
+	if err != nil {
+		t.Fatalf("get user one usage: %v", err)
+	}
+	if usage.QuotaBytes != 5 || usage.AvailableBytes != 5 {
+		t.Fatalf("user one usage = %#v, want quota and available 5", usage)
 	}
 }
 

@@ -131,3 +131,16 @@ func TestAuth_InvalidToken(t *testing.T) {
 		t.Fatalf("unexpected response body: %s", response.Body.String())
 	}
 }
+
+func TestRequirePasswordChangedBlocksOtherRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(func(c *gin.Context) { c.Set(MustChangePasswordKey, true) }, RequirePasswordChanged())
+	router.GET("/files", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/files", nil))
+	if response.Code != http.StatusPreconditionRequired {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusPreconditionRequired)
+	}
+}

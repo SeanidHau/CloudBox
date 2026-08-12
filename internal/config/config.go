@@ -57,6 +57,8 @@ type Config struct {
 	JobWorkerCount        int
 	JobPollInterval       time.Duration
 	ClamAV                ClamAVConfig
+	AdminUsername         string
+	AdminPassword         string
 }
 
 func Load() Config {
@@ -125,6 +127,8 @@ func Load() Config {
 				int64(DefaultJobPollInterval/time.Millisecond),
 			),
 		) * time.Millisecond,
+		AdminUsername: envOrDefault("ADMIN_USERNAME", ""),
+		AdminPassword: envOrDefault("ADMIN_PASSWORD", ""),
 	}
 }
 

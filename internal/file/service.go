@@ -44,6 +44,10 @@ type StorageUsageCache interface {
 	Delete(userID int64) error
 }
 
+type StorageQuotaProvider interface {
+	StorageQuotaBytes(userID int64) (int64, error)
+}
+
 type JobEnqueuer interface {
 	EnqueueForUser(
 		userID int64,
@@ -62,6 +66,14 @@ func WithStorageUsageCache(cache StorageUsageCache, ttl time.Duration) ServiceOp
 
 		service.storageUsageCache = cache
 		service.storageUsageCacheTTL = ttl
+	}
+}
+
+func WithStorageQuotaProvider(provider StorageQuotaProvider) ServiceOption {
+	return func(service *Service) {
+		if provider != nil {
+			service.storageQuotaProvider = provider
+		}
 	}
 }
 
@@ -95,6 +107,7 @@ type Service struct {
 	storageQuotaBytes    int64
 	storageUsageCache    StorageUsageCache
 	storageUsageCacheTTL time.Duration
+	storageQuotaProvider StorageQuotaProvider
 	jobEnqueuer          JobEnqueuer
 	virusScanner         scanner.Scanner
 	virusScanTimeout     time.Duration
@@ -814,10 +827,14 @@ func (s *Service) DeleteFolder(userID int64, folderID int64) error {
 }
 
 func (s *Service) GetStorageUsage(userID int64) (*StorageUsage, error) {
+	quotaBytes, err := s.storageQuotaForUser(userID)
+	if err != nil {
+		return nil, err
+	}
 	if s.storageUsageCache != nil {
 		usedBytes, found, err := s.storageUsageCache.Get(userID)
 		if err == nil && found {
-			return s.newStorageUsage(usedBytes), nil
+			return s.newStorageUsage(usedBytes, quotaBytes), nil
 		}
 	}
 
@@ -830,18 +847,18 @@ func (s *Service) GetStorageUsage(userID int64) (*StorageUsage, error) {
 		_ = s.storageUsageCache.Set(userID, usedBytes, s.storageUsageCacheTTL)
 	}
 
-	return s.newStorageUsage(usedBytes), nil
+	return s.newStorageUsage(usedBytes, quotaBytes), nil
 }
 
-func (s *Service) newStorageUsage(usedBytes int64) *StorageUsage {
-	availableBytes := s.storageQuotaBytes - usedBytes
+func (s *Service) newStorageUsage(usedBytes int64, quotaBytes int64) *StorageUsage {
+	availableBytes := quotaBytes - usedBytes
 	if availableBytes < 0 {
 		availableBytes = 0
 	}
 
 	return &StorageUsage{
 		UsedBytes:      usedBytes,
-		QuotaBytes:     s.storageQuotaBytes,
+		QuotaBytes:     quotaBytes,
 		AvailableBytes: availableBytes,
 	}
 }
@@ -856,17 +873,28 @@ func (s *Service) EnsureStorageQuota(
 	userID int64,
 	additionalBytes int64,
 ) error {
+	quotaBytes, err := s.storageQuotaForUser(userID)
+	if err != nil {
+		return err
+	}
 	usedBytes, err := s.repo.TotalFileSizeByUser(userID)
 	if err != nil {
 		return err
 	}
 
-	if usedBytes > s.storageQuotaBytes ||
-		additionalBytes > s.storageQuotaBytes-usedBytes {
+	if usedBytes > quotaBytes ||
+		additionalBytes > quotaBytes-usedBytes {
 		return ErrStorageQuotaExceeded
 	}
 
 	return nil
+}
+
+func (s *Service) storageQuotaForUser(userID int64) (int64, error) {
+	if s.storageQuotaProvider == nil {
+		return s.storageQuotaBytes, nil
+	}
+	return s.storageQuotaProvider.StorageQuotaBytes(userID)
 }
 
 func (s *Service) enqueueFileScanIfEnabled(

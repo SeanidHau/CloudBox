@@ -8,91 +8,79 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SeanidHau/CloudBox/internal/middleware"
 	"github.com/gin-gonic/gin"
 )
 
-func TestHandlerRegisterAndLogin(t *testing.T) {
+func TestHandlerRegisterWithInvitationAndLogin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-
-	handler := NewHandler(newTestService(t, "test-secret"))
+	service := newTestService(t, "test-secret")
+	admin := createTestAdmin(t, service)
+	created, err := service.CreateInvitation(admin.ID)
+	if err != nil {
+		t.Fatalf("create invitation: %v", err)
+	}
+	handler := NewHandler(service)
 	router := gin.New()
 	router.POST("/register", handler.Register)
 	router.POST("/login", handler.Login)
 
-	registerRequest := httptest.NewRequest(
-		http.MethodPost,
-		"/register",
-		bytes.NewBufferString(`{"username":"sean","password":"123456"}`),
-	)
-	registerRequest.Header.Set("Content-Type", "application/json")
-	registerResponse := httptest.NewRecorder()
-	router.ServeHTTP(registerResponse, registerRequest)
-
-	if registerResponse.Code != http.StatusCreated {
-		t.Fatalf("register status = %d, want %d: %s", registerResponse.Code, http.StatusCreated, registerResponse.Body.String())
+	request := httptest.NewRequest(http.MethodPost, "/register", bytes.NewBufferString(`{"username":"sean","password":"123456","invite_code":"`+created.Code+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("register status = %d, want %d: %s", response.Code, http.StatusCreated, response.Body.String())
 	}
 
-	var registered struct {
-		User User `json:"user"`
-	}
-	if err := json.Unmarshal(registerResponse.Body.Bytes(), &registered); err != nil {
-		t.Fatalf("decode register response: %v", err)
-	}
-	if registered.User.ID == 0 {
-		t.Fatal("expected registered user ID")
-	}
-	if registered.User.Username != "sean" {
-		t.Fatalf("registered username = %q, want %q", registered.User.Username, "sean")
-	}
-
-	loginRequest := httptest.NewRequest(
-		http.MethodPost,
-		"/login",
-		bytes.NewBufferString(`{"username":"sean","password":"123456"}`),
-	)
+	loginRequest := httptest.NewRequest(http.MethodPost, "/login", bytes.NewBufferString(`{"username":"sean","password":"123456"}`))
 	loginRequest.Header.Set("Content-Type", "application/json")
 	loginResponse := httptest.NewRecorder()
 	router.ServeHTTP(loginResponse, loginRequest)
-
 	if loginResponse.Code != http.StatusOK {
 		t.Fatalf("login status = %d, want %d: %s", loginResponse.Code, http.StatusOK, loginResponse.Body.String())
 	}
-
 	var loggedIn struct {
 		Token string `json:"token"`
+		User  User   `json:"user"`
 	}
 	if err := json.Unmarshal(loginResponse.Body.Bytes(), &loggedIn); err != nil {
-		t.Fatalf("decode login response: %v", err)
+		t.Fatalf("decode login: %v", err)
 	}
-	if loggedIn.Token == "" {
-		t.Fatal("expected login token")
+	if loggedIn.Token == "" || loggedIn.User.Username != "sean" {
+		t.Fatalf("login body = %#v", loggedIn)
+	}
+}
+
+func TestHandlerAdminRoutesRejectOrdinaryUser(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	service := newTestService(t, "test-secret")
+	user := inviteAndRegister(t, service, "sean")
+	handler := NewHandler(service)
+	router := gin.New()
+	router.Use(func(c *gin.Context) { c.Set(middleware.UserIDKey, user.ID) })
+	router.GET("/admin/users", handler.ListUsers)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/admin/users", nil))
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("admin users status = %d, want %d", response.Code, http.StatusForbidden)
 	}
 }
 
 func TestHandlerLoginRejectsWrongPassword(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-
 	service := newTestService(t, "test-secret")
-	if _, err := service.Register("sean", "123456"); err != nil {
-		t.Fatalf("register user: %v", err)
-	}
-
+	inviteAndRegister(t, service, "sean")
 	router := gin.New()
 	router.POST("/login", NewHandler(service).Login)
-
-	request := httptest.NewRequest(
-		http.MethodPost,
-		"/login",
-		bytes.NewBufferString(`{"username":"sean","password":"wrong-password"}`),
-	)
+	request := httptest.NewRequest(http.MethodPost, "/login", bytes.NewBufferString(`{"username":"sean","password":"wrong-password"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
-
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
 	}
 	if !strings.Contains(response.Body.String(), "invalid username or password") {
-		t.Fatalf("unexpected response body: %s", response.Body.String())
+		t.Fatalf("unexpected body: %s", response.Body.String())
 	}
 }

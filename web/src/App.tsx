@@ -46,7 +46,7 @@ import {
 } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "./api/client";
-import type { Folder as FolderType, PublicShareFile, Session, Share, StorageUsage, UserFile } from "./api/types";
+import type { AccountUser, CreatedInvitation, Folder as FolderType, Invitation, PublicShareFile, Session, Share, StorageUsage, UserFile } from "./api/types";
 import { clearSession, readSession, writeSession } from "./auth/session";
 import {
   findUploadResumePoint,
@@ -78,7 +78,7 @@ export default function App() {
     <Routes>
       <Route path="/share/:token" element={<PublicSharePage />} />
       <Route path="/login" element={session ? <Navigate to="/files" replace /> : <LoginPage onAuthenticated={setSession} />} />
-      <Route path="*" element={session ? <Workspace session={session} onLogout={() => setSession(null)} /> : <Navigate to="/login" replace />} />
+      <Route path="*" element={session ? session.must_change_password ? <ChangePasswordPage session={session} onChanged={() => setSession(null)} /> : <Workspace session={session} onLogout={() => setSession(null)} /> : <Navigate to="/login" replace />} />
     </Routes>
   );
 }
@@ -88,6 +88,7 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
   const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -97,10 +98,10 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
     setSubmitting(true);
     try {
       if (mode === "register") {
-        await api.register(username, password);
+        await api.register(username, password, inviteCode);
       }
-      const { token } = await api.login(username, password);
-      const next = { token, username };
+      const { token, user } = await api.login(username, password);
+      const next = { token, username: user.username, role: user.role, must_change_password: user.must_change_password };
       writeSession(next);
       onAuthenticated(next);
       const pendingDownload = sessionStorage.getItem("cloudbox.pending-share-download");
@@ -131,7 +132,7 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
           <div className="auth-heading">
             <div className="brand-inline"><span className="brand-mark"><Cloud size={18} /></span> CloudBox</div>
             <h2>{mode === "login" ? "欢迎回来" : "创建工作区账号"}</h2>
-            <p>{mode === "login" ? "使用你的账号进入文件工作台。" : "注册后会自动登录到文件工作台。"}</p>
+            <p>{mode === "login" ? "使用你的账号进入文件工作台。" : "使用管理员创建的邀请码注册账号。"}</p>
           </div>
           <label>
             用户名
@@ -141,18 +142,44 @@ function LoginPage({ onAuthenticated }: { onAuthenticated: (session: Session) =>
             密码
             <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="至少 6 位字符" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} required />
           </label>
+          {mode === "register" && <label>
+            邀请码
+            <input value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} placeholder="输入管理员提供的邀请码" autoComplete="off" required />
+          </label>}
           {error && <p className="form-error">{error}</p>}
           <button className="primary-button auth-submit" type="submit" disabled={submitting}>
             {submitting && <LoaderCircle size={17} className="spin" />}
             {mode === "login" ? "登录" : "创建账号"}
           </button>
-          <button className="text-button auth-switch" type="button" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>
+          <button className="text-button auth-switch" type="button" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); setInviteCode(""); }}>
             {mode === "login" ? "没有账号？注册一个" : "已有账号？返回登录"}
           </button>
         </form>
       </section>
     </main>
   );
+}
+
+function ChangePasswordPage({ session, onChanged }: { session: Session; onChanged: () => void }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setSubmitting(true);
+    try {
+      await api.changePassword(currentPassword, newPassword);
+      clearSession();
+      onChanged();
+    } catch (err) {
+      setError(messageOf(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+  return <main className="auth-shell"><section className="auth-intro" aria-label="CloudBox 账号安全"><div className="brand-mark brand-mark-large"><Cloud size={28} strokeWidth={2.4} /></div><p className="eyebrow">ACCOUNT SECURITY</p><h1>设置新的<br />登录密码。</h1><p className="auth-copy">为了保护账号，请先修改管理员提供的临时密码。</p></section><section className="auth-form-area"><form className="auth-form" onSubmit={submit}><div className="auth-heading"><div className="brand-inline"><span className="brand-mark"><Cloud size={18} /></span> CloudBox</div><h2>修改密码</h2><p>账号：{session.username}</p></div><label>临时密码<input value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} type="password" autoComplete="current-password" required /></label><label>新密码<input value={newPassword} onChange={(event) => setNewPassword(event.target.value)} type="password" autoComplete="new-password" placeholder="至少 6 位字符" required /></label>{error && <p className="form-error">{error}</p>}<button className="primary-button auth-submit" type="submit" disabled={submitting}>{submitting && <LoaderCircle size={17} className="spin" />}保存新密码并重新登录</button></form></section></main>;
 }
 
 function PublicSharePage() {
@@ -771,7 +798,51 @@ function SharesView({ shares, loading, error, onCopy, onRevoke }: { shares: Shar
 }
 
 function SettingsView({ session, usage }: { session: Session; usage: StorageUsage | undefined }) {
-  return <section className="settings-layout"><div className="settings-section"><p className="eyebrow">ACCOUNT</p><h2>账号与存储</h2><div className="setting-row"><div className="avatar-large">{session.username.slice(0, 1).toUpperCase()}</div><div><strong>{session.username}</strong><p>当前登录账号</p></div></div></div><div className="settings-section"><div className="setting-heading"><div><p className="eyebrow">STORAGE</p><h2>容量使用情况</h2></div><strong>{usagePercent(usage)}%</strong></div><div className="large-meter"><span style={{ width: `${usagePercent(usage)}%` }} /></div><div className="usage-numbers"><span>已使用 <strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></span><span>剩余 <strong>{formatBytes(usage?.available_bytes ?? 0)}</strong></span><span>总容量 <strong>{formatBytes(usage?.quota_bytes ?? 0)}</strong></span></div></div></section>;
+  const queryClient = useQueryClient();
+  const [notice, setNotice] = useState("");
+  const [latestInvitation, setLatestInvitation] = useState<CreatedInvitation | null>(null);
+  const isAdmin = session.role === "admin";
+  const usersQuery = useQuery({ queryKey: ["admin-users"], queryFn: api.listAdminUsers, enabled: isAdmin });
+  const invitationsQuery = useQuery({ queryKey: ["admin-invitations"], queryFn: api.listInvitations, enabled: isAdmin });
+  const users = usersQuery.data?.users ?? [];
+  const invitations = invitationsQuery.data?.invitations ?? [];
+
+  function refreshAdmin() {
+    void queryClient.invalidateQueries({ queryKey: ["admin-users"] });
+    void queryClient.invalidateQueries({ queryKey: ["admin-invitations"] });
+  }
+  async function createInvitation() {
+    try {
+      const { invitation } = await api.createInvitation();
+      setLatestInvitation(invitation);
+      setNotice("邀请码已创建，仅在当前页面展示一次。");
+      refreshAdmin();
+    } catch (err) { setNotice(messageOf(err)); }
+  }
+  async function revokeInvitation(id: number) {
+    if (!window.confirm("撤销这个未使用的邀请码？")) return;
+    try { await api.revokeInvitation(id); setNotice("邀请码已撤销。"); refreshAdmin(); } catch (err) { setNotice(messageOf(err)); }
+  }
+  async function updateQuota(user: AccountUser, value: string) {
+    const quota = Number(value) * 1024 * 1024 * 1024;
+    if (!Number.isFinite(quota) || quota <= 0) { setNotice("请输入有效的容量档位。"); return; }
+    try { await api.setAdminUserQuota(user.id, quota); setNotice(`已更新 ${user.username} 的容量。`); refreshAdmin(); } catch (err) { setNotice(messageOf(err)); }
+  }
+  async function toggleUser(user: AccountUser) {
+    const next = user.status === "active" ? "disabled" : "active";
+    if (!window.confirm(next === "disabled" ? `停用账号“${user.username}”？其现有登录状态会立即失效。` : `重新启用账号“${user.username}”？`)) return;
+    try { await api.setAdminUserStatus(user.id, next); setNotice(`账号“${user.username}”已${next === "disabled" ? "停用" : "启用"}。`); refreshAdmin(); } catch (err) { setNotice(messageOf(err)); }
+  }
+  async function resetPassword(user: AccountUser) {
+    if (!window.confirm(`重置“${user.username}”的密码？旧登录状态将立即失效。`)) return;
+    try { const result = await api.resetAdminUserPassword(user.id); setNotice(`临时密码：${result.temporary_password}。请安全地转交给用户；关闭提示后无法再次查看。`); refreshAdmin(); } catch (err) { setNotice(messageOf(err)); }
+  }
+  async function revokeShares(user: AccountUser) {
+    if (!window.confirm(`撤销“${user.username}”的全部分享链接？`)) return;
+    try { const result = await api.revokeAdminUserShares(user.id); setNotice(`已撤销 ${result.revoked} 个分享链接。`); } catch (err) { setNotice(messageOf(err)); }
+  }
+
+  return <section className="settings-layout"><div className="settings-section"><p className="eyebrow">ACCOUNT</p><h2>账号与存储</h2><div className="setting-row"><div className="avatar-large">{session.username.slice(0, 1).toUpperCase()}</div><div><strong>{session.username}</strong><p>{isAdmin ? "管理员账号" : "当前登录账号"}</p></div></div></div><div className="settings-section"><div className="setting-heading"><div><p className="eyebrow">STORAGE</p><h2>容量使用情况</h2></div><strong>{usagePercent(usage)}%</strong></div><div className="large-meter"><span style={{ width: `${usagePercent(usage)}%` }} /></div><div className="usage-numbers"><span>已使用 <strong>{formatBytes(usage?.used_bytes ?? 0)}</strong></span><span>剩余 <strong>{formatBytes(usage?.available_bytes ?? 0)}</strong></span><span>总容量 <strong>{formatBytes(usage?.quota_bytes ?? 0)}</strong></span></div></div>{isAdmin && <><section className="settings-section admin-section"><div className="setting-heading"><div><p className="eyebrow">INVITATIONS</p><h2>邀请码</h2></div><button className="primary-button compact" type="button" onClick={() => void createInvitation()}>创建邀请码</button></div><p className="settings-copy">邀请码有效期为 7 天且仅可使用一次。创建后的邀请码不会再次显示。</p>{latestInvitation && <div className="secret-result"><strong>邀请码</strong><code>{latestInvitation.code}</code><button type="button" className="secondary-button compact" onClick={() => void navigator.clipboard.writeText(latestInvitation.code).then(() => setNotice("邀请码已复制。"))}>复制</button></div>}<div className="admin-list">{invitations.length === 0 ? <p>尚未创建邀请码。</p> : invitations.map((invitation) => <div className="admin-list-row" key={invitation.id}><span><strong>创建于 {formatDate(invitation.created_at)}</strong><small>{invitation.used_at ? "已使用" : invitation.revoked_at ? "已撤销" : `有效至 ${formatDate(invitation.expires_at)}`}</small></span>{!invitation.used_at && !invitation.revoked_at && <IconAction label="撤销邀请码" tone="danger" onClick={() => void revokeInvitation(invitation.id)}><Trash2 size={16} /></IconAction>}</div>)}</div></section><section className="settings-section admin-section"><p className="eyebrow">USERS</p><h2>用户管理</h2><p className="settings-copy">管理员可调整容量、停用账号、重置密码和撤销分享，但不能浏览用户私有文件。</p><div className="admin-list">{usersQuery.isLoading ? <p>正在加载用户…</p> : users.map((user) => <div className="admin-user-row" key={user.id}><span><strong>{user.username}</strong><small>{user.role === "admin" ? "管理员" : "普通用户"} · {user.status === "active" ? "正常" : "已停用"} · {formatBytes(user.storage_quota_bytes)}</small></span><select aria-label={`${user.username} 容量`} value={String(user.storage_quota_bytes / (1024 * 1024 * 1024))} onChange={(event) => void updateQuota(user, event.target.value)} disabled={user.id === users.find((candidate) => candidate.username === session.username)?.id}><option value="1">1 GB</option><option value="5">5 GB</option><option value="10">10 GB</option></select>{user.username !== session.username && <div className="admin-row-actions"><IconAction label={user.status === "active" ? "停用账号" : "启用账号"} tone={user.status === "active" ? "danger" : undefined} onClick={() => void toggleUser(user)}>{user.status === "active" ? <Archive size={16} /> : <Check size={16} />}</IconAction><IconAction label="重置密码" onClick={() => void resetPassword(user)}><Pencil size={16} /></IconAction><IconAction label="撤销全部分享" tone="danger" onClick={() => void revokeShares(user)}><Link size={16} /></IconAction></div>}</div>)}</div></section></>}{notice && <p className="settings-notice" role="status">{notice}</p>}</section>;
 }
 
 function UploadDialog({ onClose, onUpload }: { onClose: () => void; onUpload: (files: FileList | File[]) => void }) {

@@ -87,4 +87,31 @@ export interface UploadStatus {
 export interface Session {
   token: string;
   username: string;
+  role?: "user" | "admin";
+  must_change_password?: boolean;
+}
+
+export interface AccountUser {
+  id: number;
+  username: string;
+  role: "user" | "admin";
+  status: "active" | "disabled";
+  storage_quota_bytes: number;
+  must_change_password: boolean;
+  created_at: string;
+}
+
+export interface Invitation {
+  id: number;
+  created_by_user_id: number;
+  expires_at: string;
+  used_by_user_id?: number;
+  used_at?: string;
+  revoked_at?: string;
+  created_at: string;
+}
+
+export interface CreatedInvitation {
+  invitation: Invitation;
+  code: string;
 }

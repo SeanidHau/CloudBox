@@ -236,6 +236,27 @@ func TestMigrateFileScansEnforcesStatusesAndCascades(t *testing.T) {
 	}
 }
 
+func TestMigrateUserAccessCreatesInvitationAndUserControls(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(db, "../../migrations/001_init.sql", "../../migrations/012_user_access.sql"); err != nil {
+		t.Fatalf("apply access migration: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO users (username, password_hash, role, status, storage_quota_bytes, session_version, must_change_password) VALUES ('admin', 'hash', 'admin', 'active', 1073741824, 1, 0)`); err != nil {
+		t.Fatalf("insert controlled user: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO invitations (code_digest, code_hash, created_by_user_id, expires_at) VALUES ('digest', 'hash', 1, CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatalf("insert invitation: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO users (username, password_hash, role) VALUES ('invalid-role', 'hash', 'owner')`); err == nil {
+		t.Fatal("expected unsupported role to fail")
+	}
+}
+
 func TestMigrateCreatesUploadTasksAndChunks(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
 	if err != nil {

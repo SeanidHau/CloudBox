@@ -57,6 +57,7 @@ func main() {
 			"migrations/009_background_job_user.sql",
 			"migrations/010_file_preview.sql",
 			"migrations/011_file_scans.sql",
+			"migrations/012_user_access.sql",
 		}
 
 	case "postgres":
@@ -67,6 +68,7 @@ func main() {
 			"migrations/postgres/003_background_job_user.sql",
 			"migrations/postgres/004_file_preview.sql",
 			"migrations/postgres/005_file_scans.sql",
+			"migrations/postgres/006_user_access.sql",
 		}
 
 	default:
@@ -83,7 +85,10 @@ func main() {
 	}
 
 	authRepo := auth.NewRepository(db)
-	authService := auth.NewService(authRepo, cfg.JWTSecret)
+	authService := auth.NewService(authRepo, cfg.JWTSecret, cfg.UserStorageQuotaBytes)
+	if _, err := authService.BootstrapAdmin(cfg.AdminUsername, cfg.AdminPassword); err != nil {
+		log.Fatalf("bootstrap administrator: %v", err)
+	}
 	authHandler := auth.NewHandler(authService)
 
 	logLevel := new(slog.LevelVar)
@@ -217,7 +222,7 @@ func main() {
 		filerepo,
 		objectStorage,
 		cfg.UserStorageQuotaBytes,
-		fileServiceOptions...,
+		append(fileServiceOptions, filemodule.WithStorageQuotaProvider(authRepo))...,
 	)
 	jobRunner := jobmodule.NewRunner(
 		jobRepo,
@@ -299,51 +304,52 @@ func main() {
 	api.GET("/shares/:token/preview", shareHandler.PublicPreview)
 
 	protected := api.Group("")
-	protected.Use(middleware.Auth(cfg.JWTSecret))
+	protected.Use(middleware.Auth(cfg.JWTSecret, authService.ValidateSession))
 
-	protected.GET("/me", func(c *gin.Context) {
-		userID, ok := middleware.CurrentUserID(c)
-		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
-			return
-		}
+	protected.GET("/me", authHandler.Me)
+	protected.POST("/auth/change-password", authHandler.ChangePassword)
+	ready := protected.Group("")
+	ready.Use(middleware.RequirePasswordChanged())
+	ready.GET("/admin/users", authHandler.ListUsers)
+	ready.PATCH("/admin/users/:id/quota", authHandler.SetUserQuota)
+	ready.PATCH("/admin/users/:id/status", authHandler.SetUserStatus)
+	ready.POST("/admin/users/:id/reset-password", authHandler.ResetPassword)
+	ready.DELETE("/admin/users/:id/shares", authHandler.RevokeAllUserShares)
+	ready.POST("/admin/invitations", authHandler.CreateInvitation)
+	ready.GET("/admin/invitations", authHandler.ListInvitations)
+	ready.DELETE("/admin/invitations/:id", authHandler.RevokeInvitation)
 
-		c.JSON(http.StatusOK, gin.H{
-			"user_id": userID,
-		})
-	})
-
-	protected.POST("/files", fileHandler.Upload)
-	protected.POST("/files/instant", fileHandler.InstantUpload)
-	protected.GET("/files", fileHandler.ListActive)
-	protected.GET("/files/trash", fileHandler.ListDeleted)
-	protected.GET("/files/:id/download", fileHandler.Download)
-	protected.GET("/files/:id/preview", fileHandler.Preview)
-	protected.GET("/files/:id/thumbnail", fileHandler.DownloadThumbnail)
-	protected.DELETE("/files/:id/permanent", fileHandler.PermanentlyDelete)
-	protected.DELETE("/files/:id", fileHandler.SoftDelete)
-	protected.POST("/files/:id/restore", fileHandler.Restore)
-	protected.POST("/files/:id/verify", fileHandler.EnqueueVerification)
-	protected.POST("/uploads/init", uploadHandler.Init)
-	protected.GET("/uploads", uploadHandler.ListUploading)
-	protected.PUT("/uploads/:id/chunks/:number", uploadHandler.UploadChunk)
-	protected.POST("/uploads/:id/complete", uploadHandler.Complete)
-	protected.GET("/uploads/:id", uploadHandler.GetStatus)
-	protected.DELETE("/uploads/:id", uploadHandler.Cancel)
-	protected.POST("/folders", fileHandler.CreateFolder)
-	protected.GET("/folders", fileHandler.ListFolders)
-	protected.PATCH("/files/:id/move", fileHandler.MoveActive)
-	protected.PATCH("/files/:id/rename", fileHandler.RenameActive)
-	protected.PATCH("/folders/:id/rename", fileHandler.RenameFolder)
-	protected.PATCH("/folders/:id/move", fileHandler.MoveFolder)
-	protected.DELETE("/folders/:id", fileHandler.DeleteFolder)
-	protected.GET("/storage", fileHandler.GetStorageUsage)
-	protected.POST("/files/:id/shares", shareHandler.Create)
-	protected.POST("/shares/:token/save", shareHandler.Save)
-	protected.GET("/shares/:token/download", shareHandler.Download)
-	protected.GET("/shares", shareHandler.List)
-	protected.DELETE("/shares/:token", shareHandler.Revoke)
-	protected.GET("/jobs/:id", jobHTTPHandler.Get)
+	ready.POST("/files", fileHandler.Upload)
+	ready.POST("/files/instant", fileHandler.InstantUpload)
+	ready.GET("/files", fileHandler.ListActive)
+	ready.GET("/files/trash", fileHandler.ListDeleted)
+	ready.GET("/files/:id/download", fileHandler.Download)
+	ready.GET("/files/:id/preview", fileHandler.Preview)
+	ready.GET("/files/:id/thumbnail", fileHandler.DownloadThumbnail)
+	ready.DELETE("/files/:id/permanent", fileHandler.PermanentlyDelete)
+	ready.DELETE("/files/:id", fileHandler.SoftDelete)
+	ready.POST("/files/:id/restore", fileHandler.Restore)
+	ready.POST("/files/:id/verify", fileHandler.EnqueueVerification)
+	ready.POST("/uploads/init", uploadHandler.Init)
+	ready.GET("/uploads", uploadHandler.ListUploading)
+	ready.PUT("/uploads/:id/chunks/:number", uploadHandler.UploadChunk)
+	ready.POST("/uploads/:id/complete", uploadHandler.Complete)
+	ready.GET("/uploads/:id", uploadHandler.GetStatus)
+	ready.DELETE("/uploads/:id", uploadHandler.Cancel)
+	ready.POST("/folders", fileHandler.CreateFolder)
+	ready.GET("/folders", fileHandler.ListFolders)
+	ready.PATCH("/files/:id/move", fileHandler.MoveActive)
+	ready.PATCH("/files/:id/rename", fileHandler.RenameActive)
+	ready.PATCH("/folders/:id/rename", fileHandler.RenameFolder)
+	ready.PATCH("/folders/:id/move", fileHandler.MoveFolder)
+	ready.DELETE("/folders/:id", fileHandler.DeleteFolder)
+	ready.GET("/storage", fileHandler.GetStorageUsage)
+	ready.POST("/files/:id/shares", shareHandler.Create)
+	ready.POST("/shares/:token/save", shareHandler.Save)
+	ready.GET("/shares/:token/download", shareHandler.Download)
+	ready.GET("/shares", shareHandler.List)
+	ready.DELETE("/shares/:token", shareHandler.Revoke)
+	ready.GET("/jobs/:id", jobHTTPHandler.Get)
 
 	runContext, stop := signal.NotifyContext(
 		context.Background(),

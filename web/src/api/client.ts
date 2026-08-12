@@ -1,5 +1,5 @@
 import { clearSession, readSession } from "../auth/session";
-import type { BackgroundJob, Folder, PublicShareFile, Share, StorageUsage, UploadStatus, UploadTask, UserFile } from "./types";
+import type { AccountUser, BackgroundJob, CreatedInvitation, Folder, Invitation, PublicShareFile, Share, StorageUsage, UploadStatus, UploadTask, UserFile } from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -14,6 +14,10 @@ export class ApiError extends Error {
 function userFacingError(message: string, status: number): string {
   const messages: Record<string, string> = {
     "invalid username or password": "用户名或密码不正确。",
+    "account is disabled": "该账号已被停用，请联系管理员。",
+    "invite code is required": "请输入邀请码。",
+    "invite code is invalid, expired, used, or revoked": "邀请码无效、已过期、已使用或已撤销。",
+    "password change is required": "请先修改临时密码。",
     "username already exists": "该用户名已被使用。",
     "username is required": "请输入用户名。",
     "password is required": "请输入密码。",
@@ -88,15 +92,25 @@ async function publicRequest<T>(path: string, password: string): Promise<T> {
 
 export const api = {
   login: (username: string, password: string) =>
-    request<{ token: string }>("/api/auth/login", {
+	request<{ token: string; user: AccountUser }>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({ username, password })
     }),
-  register: (username: string, password: string) =>
+  register: (username: string, password: string, inviteCode: string) =>
     request<{ user: { id: number; username: string } }>("/api/auth/register", {
       method: "POST",
-      body: JSON.stringify({ username, password })
+      body: JSON.stringify({ username, password, invite_code: inviteCode })
     }),
+  me: () => request<{ user: AccountUser }>("/api/me"),
+  changePassword: (currentPassword: string, newPassword: string) => request<{ user: AccountUser }>("/api/auth/change-password", { method: "POST", body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) }),
+  listAdminUsers: () => request<{ users: AccountUser[] }>("/api/admin/users"),
+  setAdminUserQuota: (id: number, quotaBytes: number) => request<{ user: AccountUser }>(`/api/admin/users/${id}/quota`, { method: "PATCH", body: JSON.stringify({ storage_quota_bytes: quotaBytes }) }),
+  setAdminUserStatus: (id: number, status: "active" | "disabled") => request<{ user: AccountUser }>(`/api/admin/users/${id}/status`, { method: "PATCH", body: JSON.stringify({ status }) }),
+  resetAdminUserPassword: (id: number) => request<{ user: AccountUser; temporary_password: string }>(`/api/admin/users/${id}/reset-password`, { method: "POST" }),
+  revokeAdminUserShares: (id: number) => request<{ revoked: number }>(`/api/admin/users/${id}/shares`, { method: "DELETE" }),
+  createInvitation: () => request<{ invitation: CreatedInvitation }>("/api/admin/invitations", { method: "POST" }),
+  listInvitations: () => request<{ invitations: Invitation[] }>("/api/admin/invitations"),
+  revokeInvitation: (id: number) => request<{ invitation: Invitation }>(`/api/admin/invitations/${id}`, { method: "DELETE" }),
   listFiles: (parentId: number | null) =>
     request<{ files: UserFile[] }>(parentId ? `/api/files?parent_id=${parentId}` : "/api/files"),
   listTrash: () => request<{ files: UserFile[] }>("/api/files/trash"),
