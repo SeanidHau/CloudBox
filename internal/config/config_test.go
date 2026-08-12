@@ -87,8 +87,8 @@ func TestLoadUsesDefaults(t *testing.T) {
 	if cfg.LogLevel != DefaultLogLevel {
 		t.Fatalf("log level = %q, want %q", cfg.LogLevel, DefaultLogLevel)
 	}
-	if cfg.TrashRetention != 0 {
-		t.Fatalf("trash retention = %s, want disabled", cfg.TrashRetention)
+	if cfg.TrashRetention != time.Duration(DefaultTrashRetentionHours)*time.Hour {
+		t.Fatalf("trash retention = %s, want %dh0m0s", cfg.TrashRetention, DefaultTrashRetentionHours)
 	}
 	if cfg.TraceExporter != DefaultTraceExporter {
 		t.Fatalf("trace exporter = %q, want %q", cfg.TraceExporter, DefaultTraceExporter)
@@ -342,8 +342,8 @@ func TestLoadFallsBackForInvalidTrashRetention(t *testing.T) {
 			t.Setenv("TRASH_RETENTION_HOURS", value)
 
 			cfg := Load()
-			if cfg.TrashRetention != 0 {
-				t.Fatalf("trash retention for %q = %s, want disabled", value, cfg.TrashRetention)
+			if cfg.TrashRetention != time.Duration(DefaultTrashRetentionHours)*time.Hour {
+				t.Fatalf("trash retention for %q = %s, want default", value, cfg.TrashRetention)
 			}
 		})
 	}

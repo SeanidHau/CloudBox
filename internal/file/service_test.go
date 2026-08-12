@@ -867,6 +867,33 @@ func TestServiceListDeletedMarksFilesUnavailable(t *testing.T) {
 	}
 }
 
+func TestServiceListDeletedIncludesScheduledCleanupTime(t *testing.T) {
+	service := newTestServiceWithStorageQuotaAndOptions(
+		t,
+		&fakeStorage{},
+		testStorageQuotaBytes,
+		WithTrashRetention(30*24*time.Hour),
+	)
+	file, err := service.Upload(1, "deleted.txt", "text/plain", strings.NewReader("deleted"))
+	if err != nil {
+		t.Fatalf("upload file: %v", err)
+	}
+	if err := service.SoftDelete(1, file.ID); err != nil {
+		t.Fatalf("soft delete file: %v", err)
+	}
+
+	files, err := service.ListDeleted(1)
+	if err != nil {
+		t.Fatalf("list deleted files: %v", err)
+	}
+	if len(files) != 1 || files[0].CleanupAt == nil {
+		t.Fatalf("deleted files = %#v, want cleanup time", files)
+	}
+	if files[0].CleanupAt.Before(time.Now().Add(29*24*time.Hour)) || files[0].CleanupAt.After(time.Now().Add(31*24*time.Hour)) {
+		t.Fatalf("cleanup time = %s, want about 30 days from now", files[0].CleanupAt)
+	}
+}
+
 func TestSupportsInlinePreviewAllowsOnlySupportedImages(t *testing.T) {
 	for _, test := range []struct {
 		contentType string

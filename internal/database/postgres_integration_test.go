@@ -29,6 +29,7 @@ func TestMigratePostgresBaseline(t *testing.T) {
 		filepath.Join("..", "..", "migrations", "postgres", "004_file_preview.sql"),
 		filepath.Join("..", "..", "migrations", "postgres", "005_file_scans.sql"),
 		filepath.Join("..", "..", "migrations", "postgres", "006_user_access.sql"),
+		filepath.Join("..", "..", "migrations", "postgres", "007_share_access_audit.sql"),
 	}
 	if err := Migrate(db, migrationPaths...); err != nil {
 		t.Fatalf("apply Postgres migrations: %v", err)
@@ -45,14 +46,14 @@ func TestMigratePostgresBaseline(t *testing.T) {
 		  AND table_name IN (
 			  'users', 'file_objects', 'folders', 'user_files',
 			  'upload_tasks', 'upload_chunks', 'file_shares',
-			'background_jobs', 'file_previews', 'file_scans', 'invitations'
+			'background_jobs', 'file_previews', 'file_scans', 'invitations', 'share_access_audits'
 		  )
 	`).Scan(&tableCount)
 	if err != nil {
 		t.Fatalf("count migrated tables: %v", err)
 	}
-	if tableCount != 11 {
-		t.Fatalf("migrated table count = %d, want 11", tableCount)
+	if tableCount != 12 {
+		t.Fatalf("migrated table count = %d, want 12", tableCount)
 	}
 
 	for _, migrationPath := range migrationPaths {

@@ -576,6 +576,38 @@ func TestRepositoryListActiveInFolder(t *testing.T) {
 	}
 }
 
+func TestRepositorySearchActiveFiltersNameTypeAndTime(t *testing.T) {
+	repo := newTestRepository(t)
+	image, err := repo.Create(1, "vacation-photo.png", "uploads/photo.png", 10, "image/png")
+	if err != nil {
+		t.Fatalf("create image: %v", err)
+	}
+	if _, err := repo.Create(1, "vacation-video.mp4", "uploads/video.mp4", 20, "video/mp4"); err != nil {
+		t.Fatalf("create video: %v", err)
+	}
+	if _, err := repo.Create(1, "notes.txt", "uploads/notes.txt", 5, "text/plain"); err != nil {
+		t.Fatalf("create text: %v", err)
+	}
+	if _, err := repo.Create(2, "vacation-other.png", "uploads/other.png", 10, "image/png"); err != nil {
+		t.Fatalf("create other user file: %v", err)
+	}
+
+	images, err := repo.SearchActive(1, SearchFilter{Query: "vacation", Kind: "image"})
+	if err != nil {
+		t.Fatalf("search image: %v", err)
+	}
+	if len(images) != 1 || images[0].ID != image.ID {
+		t.Fatalf("image results = %#v, want photo", images)
+	}
+	other, err := repo.SearchActive(1, SearchFilter{Kind: "other", CreatedAfter: time.Now().Add(-365 * 24 * time.Hour)})
+	if err != nil {
+		t.Fatalf("search other: %v", err)
+	}
+	if len(other) != 1 || other[0].OriginalName != "notes.txt" {
+		t.Fatalf("other results = %#v, want notes", other)
+	}
+}
+
 func TestRepositoryMoveActiveFile(t *testing.T) {
 	repo := newTestRepository(t)
 

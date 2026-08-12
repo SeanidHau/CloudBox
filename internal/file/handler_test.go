@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"testing"
@@ -40,6 +41,7 @@ func newTestFileRouterWithQuota(t *testing.T, quotaBytes int64) (*gin.Engine, st
 	protected.POST("/files", handler.Upload)
 	protected.POST("/files/instant", handler.InstantUpload)
 	protected.GET("/files", handler.ListActive)
+	protected.GET("/files/search", handler.Search)
 	protected.GET("/files/trash", handler.ListDeleted)
 	protected.GET("/files/:id/download", handler.Download)
 	protected.GET("/files/:id/preview", handler.Preview)
@@ -71,6 +73,54 @@ func newAuthenticatedRequest(method string, target string, body io.Reader, token
 	request := httptest.NewRequest(method, target, body)
 	request.Header.Set("Authorization", "Bearer "+token)
 	return request
+}
+
+func TestFileHandlerSearchValidatesFiltersAndReturnsActiveFiles(t *testing.T) {
+	router, token := newTestFileRouter(t)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreatePart(textproto.MIMEHeader{
+		"Content-Disposition": {`form-data; name="file"; filename="summer-photo.jpg"`},
+		"Content-Type":        {"image/jpeg"},
+	})
+	if err != nil {
+		t.Fatalf("create multipart file: %v", err)
+	}
+	if _, err := part.Write([]byte("image bytes")); err != nil {
+		t.Fatalf("write multipart file: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+	uploadRequest := newAuthenticatedRequest(http.MethodPost, "/files", &body, token)
+	uploadRequest.Header.Set("Content-Type", writer.FormDataContentType())
+	uploadResponse := httptest.NewRecorder()
+	router.ServeHTTP(uploadResponse, uploadRequest)
+	if uploadResponse.Code != http.StatusCreated {
+		t.Fatalf("upload status = %d, want %d: %s", uploadResponse.Code, http.StatusCreated, uploadResponse.Body.String())
+	}
+
+	searchResponse := httptest.NewRecorder()
+	router.ServeHTTP(searchResponse, newAuthenticatedRequest(http.MethodGet, "/files/search?q=summer&kind=image", nil, token))
+	if searchResponse.Code != http.StatusOK {
+		t.Fatalf("search status = %d, want %d: %s", searchResponse.Code, http.StatusOK, searchResponse.Body.String())
+	}
+	var searchResult struct {
+		Files []UserFile `json:"files"`
+	}
+	if err := json.Unmarshal(searchResponse.Body.Bytes(), &searchResult); err != nil {
+		t.Fatalf("decode search result: %v", err)
+	}
+	if len(searchResult.Files) != 1 || searchResult.Files[0].OriginalName != "summer-photo.jpg" {
+		t.Fatalf("search files = %#v, want summer-photo.jpg", searchResult.Files)
+	}
+
+	invalidResponse := httptest.NewRecorder()
+	router.ServeHTTP(invalidResponse, newAuthenticatedRequest(http.MethodGet, "/files/search?since=tomorrow", nil, token))
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid since status = %d, want %d: %s", invalidResponse.Code, http.StatusBadRequest, invalidResponse.Body.String())
+	}
 }
 
 func TestFileHandlerEnqueueVerification(t *testing.T) {

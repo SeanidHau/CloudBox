@@ -9,6 +9,7 @@ export interface UserFile {
   status: "active" | "deleted";
   availability: "ready" | "processing" | "unavailable";
   created_at: string;
+  cleanup_at?: string;
 }
 
 export interface Folder {

@@ -21,6 +21,8 @@ var (
 	ErrDownloadLimitReached   = errors.New("share download limit reached")
 	ErrSharedFileUnavailable  = errors.New("shared file is unavailable")
 	ErrShareSaveUnavailable   = errors.New("shared file save is unavailable")
+	ErrSharePasswordLocked    = errors.New("share password attempts are temporarily locked")
+	ErrShareDownloadRateLimit = errors.New("share download rate limit reached")
 )
 
 const DefaultShareLifetime = 7 * 24 * time.Hour
@@ -62,17 +64,37 @@ func WithFileSaver(saver FileSaver) ServiceOption {
 	}
 }
 
+func WithAccessControl(control *AccessControl) ServiceOption {
+	return func(service *Service) {
+		if control != nil {
+			service.accessControl = control
+		}
+	}
+}
+
+func WithAccessAuditor(auditor AccessAuditor) ServiceOption {
+	return func(service *Service) {
+		if auditor != nil {
+			service.auditor = auditor
+		}
+	}
+}
+
 type Service struct {
 	repo           *Repository
 	storage        Storage
 	downloadPolicy DownloadPolicy
 	fileSaver      FileSaver
+	accessControl  *AccessControl
+	auditor        AccessAuditor
 }
 
 func NewService(repo *Repository, storage Storage, options ...ServiceOption) *Service {
 	service := &Service{
-		repo:    repo,
-		storage: storage,
+		repo:          repo,
+		storage:       storage,
+		accessControl: NewAccessControl(),
+		auditor:       repo,
 	}
 
 	for _, option := range options {
@@ -143,39 +165,60 @@ func (s *Service) Create(
 // download, it never reserves a download slot, so opening an image preview
 // cannot exhaust a limited share.
 func (s *Service) GetPublicFile(token string, password string) (*PublicFile, error) {
-	sharedFile, err := s.findAccessibleFile(token, password, false)
+	return s.GetPublicFileFromIP(token, password, "")
+}
+
+func (s *Service) GetPublicFileFromIP(token string, password string, ipHash string) (*PublicFile, error) {
+	sharedFile, err := s.findAccessibleFile(token, password, false, ipHash)
 	if err != nil {
+		_ = s.audit(token, ipHash, AccessInfo, accessResult(err))
 		return nil, err
 	}
 
 	_, err = s.repo.FindPreviewByShareToken(token)
 	hasPreview := err == nil
 	if err != nil && !errors.Is(err, ErrFileNotFound) {
+		_ = s.audit(token, ipHash, AccessInfo, AccessDenied)
 		return nil, err
 	}
 
-	return &PublicFile{
+	result := &PublicFile{
 		OriginalName: sharedFile.OriginalName,
 		Size:         sharedFile.Size,
 		ContentType:  sharedFile.ContentType,
 		HasPreview:   hasPreview,
-	}, nil
+	}
+	if err := s.audit(token, ipHash, AccessInfo, AccessAllowed); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *Service) OpenPublicPreview(token string, password string) (*SharedPreview, io.ReadSeekCloser, error) {
-	if _, err := s.findAccessibleFile(token, password, false); err != nil {
+	return s.OpenPublicPreviewFromIP(token, password, "")
+}
+
+func (s *Service) OpenPublicPreviewFromIP(token string, password string, ipHash string) (*SharedPreview, io.ReadSeekCloser, error) {
+	if _, err := s.findAccessibleFile(token, password, false, ipHash); err != nil {
+		_ = s.audit(token, ipHash, AccessPreview, accessResult(err))
 		return nil, nil, err
 	}
 
 	preview, err := s.repo.FindPreviewByShareToken(token)
 	if err != nil {
+		_ = s.audit(token, ipHash, AccessPreview, AccessDenied)
 		return nil, nil, err
 	}
 	reader, err := s.storage.Open(preview.StoragePath)
 	if err != nil {
+		_ = s.audit(token, ipHash, AccessPreview, AccessDenied)
 		return nil, nil, err
 	}
 
+	if err := s.audit(token, ipHash, AccessPreview, AccessAllowed); err != nil {
+		_ = reader.Close()
+		return nil, nil, err
+	}
 	return preview, reader, nil
 }
 
@@ -193,19 +236,34 @@ func (s *Service) OpenForDownload(
 	token string,
 	password string,
 ) (*SharedFile, io.ReadSeekCloser, error) {
-	file, err := s.findAccessibleFile(token, password, true)
+	return s.OpenForDownloadFromIP(token, password, "")
+}
+
+func (s *Service) OpenForDownloadFromIP(
+	token string,
+	password string,
+	ipHash string,
+) (*SharedFile, io.ReadSeekCloser, error) {
+	file, err := s.findAccessibleFile(token, password, true, ipHash)
 	if err != nil {
+		_ = s.audit(token, ipHash, AccessDownload, accessResult(err))
 		return nil, nil, err
+	}
+	if !s.accessControl.AllowDownload(token, ipHash) {
+		_ = s.audit(token, ipHash, AccessDownload, AccessRateLimited)
+		return nil, nil, ErrShareDownloadRateLimit
 	}
 
 	reader, err := s.storage.Open(file.StoragePath)
 	if err != nil {
+		_ = s.audit(token, ipHash, AccessDownload, AccessDenied)
 		return nil, nil, err
 	}
 
 	reserved, err := s.repo.ReserveDownload(token)
 	if err != nil {
 		_ = reader.Close()
+		_ = s.audit(token, ipHash, AccessDownload, AccessDenied)
 		return nil, nil, err
 	}
 	if !reserved {
@@ -213,27 +271,41 @@ func (s *Service) OpenForDownload(
 
 		latest, err := s.repo.FindByToken(token)
 		if err != nil {
+			_ = s.audit(token, ipHash, AccessDownload, AccessDenied)
 			return nil, nil, err
 		}
 		if latest.ExpiresAt != nil && !latest.ExpiresAt.After(time.Now()) {
+			_ = s.audit(token, ipHash, AccessDownload, AccessDenied)
 			return nil, nil, ErrShareExpired
 		}
 
+		_ = s.audit(token, ipHash, AccessDownload, AccessDenied)
 		return nil, nil, ErrDownloadLimitReached
 	}
 
+	if err := s.audit(token, ipHash, AccessDownload, AccessAllowed); err != nil {
+		_ = reader.Close()
+		return nil, nil, err
+	}
 	return file, reader, nil
 }
 
-func (s *Service) findAccessibleFile(token string, password string, requireDownloadSlot bool) (*SharedFile, error) {
+func (s *Service) findAccessibleFile(token string, password string, requireDownloadSlot bool, ipHash string) (*SharedFile, error) {
+	if s.accessControl.PasswordLocked(token, ipHash) {
+		return nil, ErrSharePasswordLocked
+	}
 	share, err := s.repo.FindByToken(token)
 	if err != nil {
 		return nil, err
 	}
 
 	if err := validateShareAccess(share, password, requireDownloadSlot); err != nil {
+		if errors.Is(err, ErrSharePasswordInvalid) {
+			s.accessControl.RecordPasswordFailure(token, ipHash)
+		}
 		return nil, err
 	}
+	s.accessControl.ClearPasswordFailures(token, ipHash)
 
 	file, err := s.repo.FindActiveFileByShareToken(token)
 	if err != nil {
@@ -257,33 +329,61 @@ func (s *Service) SaveToUserFiles(
 	password string,
 	parentID *int64,
 ) (*filemodule.UserFile, error) {
+	return s.SaveToUserFilesFromIP(userID, token, password, parentID, "")
+}
+
+func (s *Service) SaveToUserFilesFromIP(
+	userID int64,
+	token string,
+	password string,
+	parentID *int64,
+	ipHash string,
+) (*filemodule.UserFile, error) {
 	if s.fileSaver == nil {
 		return nil, ErrShareSaveUnavailable
 	}
 
 	share, err := s.repo.FindByToken(token)
 	if err != nil {
+		_ = s.audit(token, ipHash, AccessSave, AccessDenied)
 		return nil, err
+	}
+	if s.accessControl.PasswordLocked(token, ipHash) {
+		_ = s.audit(token, ipHash, AccessSave, AccessLocked)
+		return nil, ErrSharePasswordLocked
 	}
 	if err := validateShareAccess(share, password, true); err != nil {
+		if errors.Is(err, ErrSharePasswordInvalid) {
+			s.accessControl.RecordPasswordFailure(token, ipHash)
+		}
+		_ = s.audit(token, ipHash, AccessSave, accessResult(err))
 		return nil, err
 	}
+	s.accessControl.ClearPasswordFailures(token, ipHash)
 
 	sharedFile, err := s.repo.FindActiveFileByShareToken(token)
 	if err != nil {
+		_ = s.audit(token, ipHash, AccessSave, AccessDenied)
 		return nil, err
 	}
 	if s.downloadPolicy != nil {
 		if err := s.downloadPolicy.CheckFileObjectDownload(sharedFile.ObjectID); err != nil {
+			_ = s.audit(token, ipHash, AccessSave, AccessDenied)
 			return nil, fmt.Errorf("%w: %v", ErrSharedFileUnavailable, err)
 		}
+	}
+	if !s.accessControl.AllowDownload(token, ipHash) {
+		_ = s.audit(token, ipHash, AccessSave, AccessRateLimited)
+		return nil, ErrShareDownloadRateLimit
 	}
 
 	reserved, err := s.repo.ReserveDownload(token)
 	if err != nil {
+		_ = s.audit(token, ipHash, AccessSave, AccessDenied)
 		return nil, err
 	}
 	if !reserved {
+		_ = s.audit(token, ipHash, AccessSave, AccessDenied)
 		return nil, ErrDownloadLimitReached
 	}
 
@@ -296,12 +396,34 @@ func (s *Service) SaveToUserFiles(
 	if err != nil {
 		// A failed save must not consume an available download slot.
 		if releaseErr := s.repo.ReleaseDownloadReservation(token); releaseErr != nil {
+			_ = s.audit(token, ipHash, AccessSave, AccessDenied)
 			return nil, fmt.Errorf("save shared file: %w (release reservation: %v)", err, releaseErr)
 		}
+		_ = s.audit(token, ipHash, AccessSave, AccessDenied)
 		return nil, err
 	}
 
+	if err := s.audit(token, ipHash, AccessSave, AccessAllowed); err != nil {
+		return nil, err
+	}
 	return file, nil
+}
+
+func (s *Service) audit(token string, ipHash string, action AccessAction, result AccessResult) error {
+	if s.auditor == nil {
+		return nil
+	}
+	return s.auditor.RecordShareAccess(AccessAudit{Token: token, IPHash: ipHash, Action: action, Result: result})
+}
+
+func accessResult(err error) AccessResult {
+	if errors.Is(err, ErrSharePasswordLocked) {
+		return AccessLocked
+	}
+	if errors.Is(err, ErrShareDownloadRateLimit) {
+		return AccessRateLimited
+	}
+	return AccessDenied
 }
 
 func validateShareAccess(share *Share, password string, requireDownloadSlot bool) error {

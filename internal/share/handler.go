@@ -30,6 +30,10 @@ func publicSharePassword(c *gin.Context) string {
 	return c.GetHeader("X-Share-Password")
 }
 
+func shareIPHash(c *gin.Context) string {
+	return HashIP(c.ClientIP())
+}
+
 func NewHandler(service *Service) *Handler {
 	return &Handler{
 		service: service,
@@ -79,9 +83,10 @@ func (h *Handler) Create(c *gin.Context) {
 }
 
 func (h *Handler) Download(c *gin.Context) {
-	file, reader, err := h.service.OpenForDownload(
+	file, reader, err := h.service.OpenForDownloadFromIP(
 		c.Param("token"),
 		publicSharePassword(c),
+		shareIPHash(c),
 	)
 	if errors.Is(err, ErrShareNotFound) || errors.Is(err, ErrFileNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "share not found"})
@@ -89,6 +94,14 @@ func (h *Handler) Download(c *gin.Context) {
 	}
 	if errors.Is(err, ErrSharePasswordRequired) || errors.Is(err, ErrSharePasswordInvalid) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid share password"})
+		return
+	}
+	if errors.Is(err, ErrSharePasswordLocked) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, ErrShareDownloadRateLimit) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
 		return
 	}
 	if errors.Is(err, ErrShareExpired) || errors.Is(err, ErrDownloadLimitReached) {
@@ -112,7 +125,7 @@ func (h *Handler) Download(c *gin.Context) {
 }
 
 func (h *Handler) PublicInfo(c *gin.Context) {
-	file, err := h.service.GetPublicFile(c.Param("token"), publicSharePassword(c))
+	file, err := h.service.GetPublicFileFromIP(c.Param("token"), publicSharePassword(c), shareIPHash(c))
 	if writeShareAccessError(c, err) {
 		return
 	}
@@ -120,7 +133,7 @@ func (h *Handler) PublicInfo(c *gin.Context) {
 }
 
 func (h *Handler) PublicPreview(c *gin.Context) {
-	preview, reader, err := h.service.OpenPublicPreview(c.Param("token"), publicSharePassword(c))
+	preview, reader, err := h.service.OpenPublicPreviewFromIP(c.Param("token"), publicSharePassword(c), shareIPHash(c))
 	if writeShareAccessError(c, err) {
 		return
 	}
@@ -139,6 +152,8 @@ func writeShareAccessError(c *gin.Context, err error) bool {
 		c.JSON(http.StatusNotFound, gin.H{"error": "share not found"})
 	case errors.Is(err, ErrSharePasswordRequired), errors.Is(err, ErrSharePasswordInvalid):
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid share password"})
+	case errors.Is(err, ErrSharePasswordLocked), errors.Is(err, ErrShareDownloadRateLimit):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
 	case errors.Is(err, ErrShareExpired), errors.Is(err, ErrDownloadLimitReached):
 		c.JSON(http.StatusGone, gin.H{"error": err.Error()})
 	case errors.Is(err, ErrSharedFileUnavailable):
@@ -162,11 +177,12 @@ func (h *Handler) Save(c *gin.Context) {
 		return
 	}
 
-	file, err := h.service.SaveToUserFiles(
+	file, err := h.service.SaveToUserFilesFromIP(
 		userID,
 		c.Param("token"),
 		req.Password,
 		req.ParentID,
+		shareIPHash(c),
 	)
 
 	switch {
@@ -174,6 +190,8 @@ func (h *Handler) Save(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "share not found"})
 	case errors.Is(err, ErrSharePasswordRequired), errors.Is(err, ErrSharePasswordInvalid):
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid share password"})
+	case errors.Is(err, ErrSharePasswordLocked), errors.Is(err, ErrShareDownloadRateLimit):
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
 	case errors.Is(err, ErrShareExpired), errors.Is(err, ErrDownloadLimitReached):
 		c.JSON(http.StatusGone, gin.H{"error": err.Error()})
 	case errors.Is(err, ErrSharedFileUnavailable):

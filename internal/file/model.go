@@ -30,6 +30,7 @@ type UserFile struct {
 	Availability string       `json:"availability"`
 	CreatedAt    time.Time    `json:"created_at"`
 	DeletedAt    sql.NullTime `json:"-"`
+	CleanupAt    *time.Time   `json:"cleanup_at,omitempty"`
 }
 
 type Folder struct {
@@ -56,6 +57,13 @@ type StorageUsage struct {
 	UsedBytes      int64 `json:"used_bytes"`
 	QuotaBytes     int64 `json:"quota_bytes"`
 	AvailableBytes int64 `json:"available_bytes"`
+}
+
+type SearchFilter struct {
+	Query         string
+	Kind          string
+	CreatedAfter  time.Time
+	CreatedBefore time.Time
 }
 
 type FilePreview struct {

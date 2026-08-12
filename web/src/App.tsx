@@ -289,6 +289,8 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   const [searchParams, setSearchParams] = useSearchParams();
   const [selected, setSelected] = useState<SelectedItem>(null);
   const [search, setSearch] = useState("");
+  const [searchKind, setSearchKind] = useState<"" | "image" | "video" | "other">("");
+  const [searchPeriod, setSearchPeriod] = useState<"" | "7d" | "30d" | "year" | "older">("");
   const [toast, setToast] = useState<Toast>(null);
   const [dialog, setDialog] = useState<"upload" | "folder" | "rename" | "move" | "share" | "save-share" | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
@@ -317,6 +319,21 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   const rootFoldersQuery = useQuery({ queryKey: ["folders", null], queryFn: () => api.listFolders(null) });
   const storageQuery = useQuery({ queryKey: ["storage"], queryFn: api.storage });
   const sharesQuery = useQuery({ queryKey: ["shares"], queryFn: api.listShares, enabled: view === "shares" });
+  const searchRange = useMemo(() => {
+    const now = new Date();
+    const yearStart = new Date(now.getFullYear(), 0, 1);
+    if (searchPeriod === "7d") return { since: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString() };
+    if (searchPeriod === "30d") return { since: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString() };
+    if (searchPeriod === "year") return { since: yearStart.toISOString() };
+    if (searchPeriod === "older") return { before: yearStart.toISOString() };
+    return {};
+  }, [searchPeriod]);
+  const isSearching = view === "files" && Boolean(search.trim() || searchKind || searchPeriod);
+  const searchQuery = useQuery({
+    queryKey: ["file-search", search.trim(), searchKind, searchPeriod],
+    queryFn: () => api.searchFiles({ query: search.trim() || undefined, kind: searchKind || undefined, ...searchRange }),
+    enabled: isSearching
+  });
 
   useEffect(() => setSelected(null), [location.pathname, parentID]);
   useEffect(() => {
@@ -347,23 +364,25 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     return () => window.removeEventListener("mousedown", closeAccountMenu);
   }, [accountMenuOpen]);
 
-  const files = view === "trash" ? trashQuery.data?.files ?? [] : filesQuery.data?.files ?? [];
-  const folders = foldersQuery.data?.folders ?? [];
+  const files = view === "trash" ? trashQuery.data?.files ?? [] : isSearching ? searchQuery.data?.files ?? [] : filesQuery.data?.files ?? [];
+  const folders = isSearching ? [] : foldersQuery.data?.folders ?? [];
   const filteredFiles = useMemo(() => {
+    if (isSearching) return files;
     const normalized = search.trim().toLowerCase();
     return normalized ? files.filter((item) => item.original_name.toLowerCase().includes(normalized)) : files;
-  }, [files, search]);
+  }, [files, isSearching, search]);
   const filteredFolders = useMemo(() => {
+    if (isSearching) return [];
     const normalized = search.trim().toLowerCase();
     return normalized ? folders.filter((item) => item.name.toLowerCase().includes(normalized)) : folders;
-  }, [folders, search]);
+  }, [folders, isSearching, search]);
   const entries = useMemo<DirectoryEntry[]>(() => [
     ...filteredFolders.map((value) => ({ type: "folder" as const, value })),
     ...filteredFiles.map((value) => ({ type: "file" as const, value }))
   ], [filteredFiles, filteredFolders]);
   const previewableImages = useMemo(() => files.filter(isInlinePreviewable), [files]);
-  const isLoading = (view === "files" && (filesQuery.isLoading || foldersQuery.isLoading)) || (view === "trash" && trashQuery.isLoading) || (view === "shares" && sharesQuery.isLoading);
-  const loadError = view === "files" ? filesQuery.error ?? foldersQuery.error : view === "trash" ? trashQuery.error : sharesQuery.error;
+  const isLoading = (view === "files" && (isSearching ? searchQuery.isLoading : filesQuery.isLoading || foldersQuery.isLoading)) || (view === "trash" && trashQuery.isLoading) || (view === "shares" && sharesQuery.isLoading);
+  const loadError = view === "files" ? isSearching ? searchQuery.error : filesQuery.error ?? foldersQuery.error : view === "trash" ? trashQuery.error : sharesQuery.error;
 
   function invalidateWorkspace() {
     void queryClient.invalidateQueries({ queryKey: ["files"] });
@@ -371,6 +390,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     void queryClient.invalidateQueries({ queryKey: ["trash"] });
     void queryClient.invalidateQueries({ queryKey: ["storage"] });
     void queryClient.invalidateQueries({ queryKey: ["shares"] });
+    void queryClient.invalidateQueries({ queryKey: ["file-search"] });
   }
 
   function show(message: string, tone: NonNullable<Toast>["tone"] = "success") {
@@ -488,7 +508,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   }
 
   function openFolder(folder: FolderType) {
-    setSearch("");
+    clearSearch();
     setFolderPath([...folderPath, folder.id], [...folderNames, folder.name]);
   }
 
@@ -506,13 +526,19 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
   }
 
   function goUp() {
-    setSearch("");
+    clearSearch();
     setFolderPath(folderPath.slice(0, -1), folderNames.slice(0, -1));
   }
 
   function goToPath(index: number) {
-    setSearch("");
+    clearSearch();
     setFolderPath(folderPath.slice(0, index + 1), folderNames.slice(0, index + 1));
+  }
+
+  function clearSearch() {
+    setSearch("");
+    setSearchKind("");
+    setSearchPeriod("");
   }
 
   function logout() {
@@ -522,7 +548,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
     navigate("/login", { replace: true });
   }
 
-  const currentTitle = view === "trash" ? "回收站" : view === "shares" ? "分享链接" : view === "settings" ? "设置" : parentID ? folderNames.at(-1) || "当前文件夹" : "我的文件";
+  const currentTitle = view === "trash" ? "回收站" : view === "shares" ? "分享链接" : view === "settings" ? "设置" : isSearching ? "搜索结果" : parentID ? folderNames.at(-1) || "当前文件夹" : "我的文件";
 
   return (
     <div className="workspace-shell">
@@ -548,12 +574,12 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
         <header className="topbar">
           <div className="breadcrumb">
             {view === "files" ? <>
-              <button type="button" className="breadcrumb-root" onClick={() => { setFolderPath([]); setSearch(""); }}>我的文件</button>
+              <button type="button" className="breadcrumb-root" onClick={() => { setFolderPath([]); clearSearch(); }}>我的文件</button>
               {folderPath.map((id, index) => <span className="breadcrumb-item" key={id}><ChevronRight size={16} />{index === folderPath.length - 1 ? <span>{folderNames[index] || "当前文件夹"}</span> : <button type="button" className="breadcrumb-root" onClick={() => goToPath(index)}>{folderNames[index] || "当前文件夹"}</button>}</span>)}
             </> : <span className="topbar-context">{currentTitle}</span>}
           </div>
           <div className="topbar-actions">
-            {view === "files" && <label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索当前目录" /></label>}
+            {view === "files" && <label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索全部文件" /></label>}
             <button type="button" className="icon-button" title="帮助" aria-label="打开帮助" aria-expanded={helpOpen} onClick={() => { setHelpOpen(true); setAccountMenuOpen(false); }}><CircleHelp size={19} /></button>
             <div className="account-menu-wrap" ref={accountMenuRef}>
               <button type="button" className="user-button" title={`当前用户：${session.username}`} aria-label="打开账户菜单" aria-expanded={accountMenuOpen} onClick={() => { setAccountMenuOpen((open) => !open); setHelpOpen(false); }}><span>{session.username.slice(0, 1).toUpperCase()}</span></button>
@@ -578,6 +604,17 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
             </div>}
           </div>
 
+          {view === "files" && <div className="search-filters" aria-label="搜索筛选">
+            <span>筛选</span>
+            <select value={searchKind} onChange={(event) => setSearchKind(event.target.value as typeof searchKind)} aria-label="文件类型">
+              <option value="">全部类型</option><option value="image">图片</option><option value="video">视频</option><option value="other">其他</option>
+            </select>
+            <select value={searchPeriod} onChange={(event) => setSearchPeriod(event.target.value as typeof searchPeriod)} aria-label="创建时间">
+              <option value="">全部时间</option><option value="7d">最近 7 日</option><option value="30d">最近 30 日</option><option value="year">今年</option><option value="older">更早</option>
+            </select>
+            {isSearching && <button type="button" className="filter-clear" onClick={clearSearch}>清除筛选</button>}
+          </div>}
+
           {view === "settings" ? (
             <SettingsView session={session} usage={storageQuery.data} />
           ) : view === "shares" ? (
@@ -590,7 +627,7 @@ function Workspace({ session, onLogout }: { session: Session; onLogout: () => vo
               <section className="file-surface" onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); void handleUpload(event.dataTransfer.files); }}>
                 {dragging && <div className="drop-overlay"><Upload size={24} /><strong>释放以上传到当前目录</strong><span>上传后会完成处理，完成后即可访问</span></div>}
                 <div className="file-table-wrap">
-                  <div className="section-label">{view === "trash" ? "已删除文件" : "目录内容"} <span>{view === "trash" ? filteredFiles.length : entries.length}</span></div>
+                  <div className="section-label">{view === "trash" ? "已删除文件" : isSearching ? "搜索结果" : "目录内容"} <span>{view === "trash" ? filteredFiles.length : entries.length}</span></div>
                   <div className="file-table">
                     <div className="file-row file-row-head"><span>名称</span><span>大小</span><span>类型</span><span>创建时间</span><span /></div>
                     {isLoading && <LoadingRows />}
@@ -659,7 +696,7 @@ function FileRow({ file, selected, trash, onSelect, onDownload, onDelete, onRest
   const accessible = file.availability === "ready";
   return <div className={`file-row ${selected ? "selected" : ""}`} onClick={onSelect} onDoubleClick={accessible ? onDownload : undefined}>
     <span className="file-name"><FileKindIcon file={file} /><strong>{file.original_name}</strong></span>
-    <span>{formatBytes(file.size)}</span><span className="file-type">{shortType(file.content_type)}</span><span>{formatDate(file.created_at)}</span>
+    <span>{formatBytes(file.size)}</span><span className="file-type">{shortType(file.content_type)}</span><span>{trash && file.cleanup_at ? `清理于 ${formatDate(file.cleanup_at)}` : formatDate(file.created_at)}</span>
     <span className="row-actions" onClick={(event) => event.stopPropagation()}>
       {trash ? <><IconAction label="恢复" onClick={onRestore}><Archive size={16} /></IconAction><IconAction label="彻底删除" tone="danger" onClick={onDelete}><Trash2 size={16} /></IconAction></> : <>{accessible && <IconAction label="下载" onClick={onDownload}><Download size={16} /></IconAction>}<IconAction label="移入回收站" tone="danger" onClick={onDelete}><Trash2 size={16} /></IconAction></>}
     </span>

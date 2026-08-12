@@ -1,21 +1,23 @@
 # CloudBox
 
-CloudBox 是一个用 Go 实现的文件存储学习项目。项目由 Go API 服务和 React Web 工作台组成，提供认证、文件管理、分片上传、内容去重、分享链接、后台任务、缩略图、可选病毒扫描和可切换的基础设施组件。
+CloudBox 是一个面向个人与受邀朋友的轻量媒体网盘学习项目。项目由 Go API 服务和 React Web 工作台组成，提供邀请注册、文件管理、分片续传、内容去重、受控分享、后台任务、缩略图、可选病毒扫描和可切换的基础设施组件。
 
 Web 工作台的接口边界见 [项目概况.md](项目概况.md)。其中明确列出了已实现接口与仍未提供的后端能力。
 
 ## 当前能力
 
-- 用户注册、bcrypt 密码哈希、JWT 登录和路由鉴权。
+- 邀请码注册、bcrypt 密码哈希、JWT 会话鉴权、账号禁用和强制修改临时密码。
 - 文件上传、列表、下载、HTTP Range、回收站、恢复、永久删除、重命名和移动。
 - 文件夹创建、浏览、重命名、移动和空目录删除。
 - SHA-256 内容去重、秒传和按用户逻辑存储配额。
 - 分片上传、断点续传基础、分片校验、完整文件校验和合并。
-- 分享链接、可选密码、过期时间、下载次数上限和公开 Range 下载。
+- 分享链接、公开图片预览、登录下载/保存副本、可选密码、过期时间和下载次数上限。
+- 公开链接按 IP 限制下载频率；密码连续错误会临时锁定，并记录匿名化访问审计。
+- 管理员邀请码、账号状态、容量档位、临时密码和分享撤销管理；管理员不默认访问用户私有文件。
 - 持久化后台任务、文件完整性校验、缩略图和可选 ClamAV 病毒扫描。
 - 本地磁盘或 MinIO 对象存储；SQLite 或 PostgreSQL；可选 Redis 用量缓存。
 - JSON 访问日志、Prometheus HTTP 指标、OpenTelemetry HTTP 链路追踪、GitHub Actions 和 Docker Compose。
-- React + TypeScript 文件工作台：登录注册、文件与目录浏览、普通/分片上传、回收站、分享链接、容量展示和图片缩略图。
+- React + TypeScript 文件工作台：邀请注册、文件与目录浏览、名称/类型/时间搜索、普通/分片上传与续传、回收站、分享链接、容量展示、图片预览和移动端媒体网格。
 
 ## 快速开始
 
@@ -65,10 +67,10 @@ npm run dev
 
 前端提供以下已接入的工作流：
 
-- 注册、登录和 JWT 会话保存。
+- 邀请注册、登录、JWT 会话保存和临时密码强制修改。
 - 根目录与子目录浏览、创建目录、重命名、移动与空目录删除。
 - 小文件直接上传；大于 `5 MB` 的文件自动走分片初始化、逐块上传和合并完成接口。
-- 文件下载、回收站恢复/永久删除、创建与撤销分享链接。
+- 文件搜索、下载、回收站恢复/永久删除、创建与撤销分享链接。
 - 存储用量展示，以及使用鉴权请求读取图片缩略图。
 
 前端不伪造病毒扫描状态。扫描未完成时，下载或缩略图接口返回 `423`，前端会提示当前文件暂不可用；扫描未通过时按后端返回的 `403` 提示处理。文件详情中的“发起完整性校验”调用的是 `file.verify` 后台任务，不是病毒扫描任务。
@@ -94,6 +96,8 @@ npm run build
 | `DATABASE_URL` | 空 | PostgreSQL 连接 URL；`DATABASE_DRIVER=postgres` 时必填。 |
 | `UPLOAD_DIR` | `uploads` | 本地文件、缩略图和分片临时文件目录。 |
 | `JWT_SECRET` | `dev-secret-change-me` | JWT 签名密钥。生产环境必须替换。 |
+| `ADMIN_USERNAME` | 空 | 首位管理员用户名；与 `ADMIN_PASSWORD` 同时设置时初始化或提升该账号。 |
+| `ADMIN_PASSWORD` | 空 | 首位管理员初始密码；生产环境应通过安全的环境注入提供。 |
 | `USER_STORAGE_QUOTA_BYTES` | `1073741824` | 单用户逻辑存储配额，单位为字节。 |
 | `STORAGE_DRIVER` | `local` | 存储驱动：`local` 或 `minio`。 |
 | `MINIO_ENDPOINT` | `localhost:9000` | MinIO 服务地址，不包含协议。 |
@@ -106,7 +110,7 @@ npm run build
 | `REDIS_PASSWORD` | 空 | Redis 密码。 |
 | `REDIS_DB` | `0` | Redis 逻辑数据库编号，不能为负数。 |
 | `REDIS_USAGE_CACHE_TTL_SECONDS` | `60` | 存储用量缓存有效期，单位为秒。 |
-| `TRASH_RETENTION_HOURS` | `0` | 回收站自动永久删除保留期，单位为小时；`0` 表示关闭。 |
+| `TRASH_RETENTION_HOURS` | `720` | 回收站自动永久删除保留期，单位为小时；设为 `0` 可关闭自动清理。 |
 | `LOG_LEVEL` | `info` | JSON 请求日志最低级别：`debug`、`info`、`warn` 或 `error`。 |
 | `TRACE_EXPORTER` | `none` | 链路追踪导出器：`none` 或 `stdout`。 |
 | `JOB_WORKER_COUNT` | `1` | 后台任务 Worker 数量；`0` 表示只创建任务，不消费任务。 |
@@ -215,9 +219,11 @@ Authorization: Bearer <JWT>
 | 注册 | `POST /api/auth/register` |
 | 登录 | `POST /api/auth/login` |
 | 当前用户 | `GET /api/me` |
+| 修改密码 | `POST /api/auth/change-password` |
 | 小文件上传 | `POST /api/files` |
 | 秒传 | `POST /api/files/instant` |
 | 活跃文件列表 | `GET /api/files`，可选 `?parent_id=<目录 ID>` |
+| 文件搜索 | `GET /api/files/search`，支持 `q`、`kind=image|video|other`、`since` 和 `before`（RFC 3339） |
 | 回收站 | `GET /api/files/trash` |
 | 下载或 Range 下载 | `GET /api/files/:id/download` |
 | 缩略图 | `GET /api/files/:id/thumbnail` |
@@ -237,7 +243,10 @@ Authorization: Bearer <JWT>
 | 创建分享链接 | `POST /api/files/:id/shares` |
 | 查看我的分享链接 | `GET /api/shares` |
 | 撤销分享链接 | `DELETE /api/shares/:token` |
+| 公开分享信息 | `GET /api/shares/:token`，可选 `X-Share-Password` |
+| 公开图片预览 | `GET /api/shares/:token/preview`，可选 `X-Share-Password` |
 | 公开下载分享文件 | `GET /api/shares/:token/download`，可选 `X-Share-Password` |
+| 保存分享副本 | `POST /api/shares/:token/save` |
 | 初始化分片上传 | `POST /api/uploads/init` |
 | 上传分片 | `PUT /api/uploads/:id/chunks/:number` |
 | 查询上传状态 | `GET /api/uploads/:id` |
@@ -272,7 +281,13 @@ POST /api/uploads/:id/complete
 
 软删除只改变用户文件状态。永久删除会删除关联分享链接、减少文件对象引用计数，并在引用计数归零时尽力删除实际存储对象和缩略图。存储清理失败不会恢复已完成的数据库删除，服务会记录错误日志。
 
-`TRASH_RETENTION_HOURS` 为正整数时，服务在启动时和每小时执行一次回收站清理。值为 `0` 时不执行自动清理。
+默认保留期为 30 天。服务在启动时和每小时执行一次回收站清理；清理会撤销关联分享、释放逻辑容量，并在最后一个引用删除后尽力清理实际对象和缩略图。`TRASH_RETENTION_HOURS=0` 可关闭自动清理。
+
+### 公开分享保护
+
+公开分享的下载和保存副本按分享 token 与匿名化 IP 分别限速：单 IP 最多 20 次/分钟。密码连续错误 5 次后，该 IP 在该分享上锁定 10 分钟。系统审计 token、匿名化 IP、动作、结果和时间，不记录原始 IP。
+
+限制状态目前保存在 API 进程内，适合单实例部署。后续部署多个 API 实例时，应改用 Redis 等共享存储保存限速和锁定状态。
 
 ## 后台任务和缩略图
 

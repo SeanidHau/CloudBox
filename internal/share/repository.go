@@ -276,3 +276,8 @@ func (r *Repository) DeleteByToken(userID int64, token string) error {
 
 	return nil
 }
+
+func (r *Repository) RecordShareAccess(audit AccessAudit) error {
+	_, err := r.db.Exec(`INSERT INTO share_access_audits (token, ip_hash, action, result) VALUES ($1, $2, $3, $4)`, audit.Token, audit.IPHash, audit.Action, audit.Result)
+	return err
+}

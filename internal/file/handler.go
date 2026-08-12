@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/SeanidHau/CloudBox/internal/middleware"
 	"github.com/gin-gonic/gin"
@@ -38,6 +40,41 @@ type renameFolderRequest struct {
 
 type moveFolderRequest struct {
 	ParentID *int64 `json:"parent_id"`
+}
+
+func (h *Handler) Search(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing user id"})
+		return
+	}
+	filter := SearchFilter{Query: strings.TrimSpace(c.Query("q")), Kind: strings.TrimSpace(c.Query("kind"))}
+	if filter.Kind != "" && filter.Kind != "image" && filter.Kind != "video" && filter.Kind != "other" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid search kind"})
+		return
+	}
+	if since := c.Query("since"); since != "" {
+		parsed, err := time.Parse(time.RFC3339, since)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid search time"})
+			return
+		}
+		filter.CreatedAfter = parsed
+	}
+	if before := c.Query("before"); before != "" {
+		parsed, err := time.Parse(time.RFC3339, before)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid search time"})
+			return
+		}
+		filter.CreatedBefore = parsed
+	}
+	files, err := h.service.SearchActive(userID, filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to search files"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"files": files})
 }
 
 func NewHandler(service *Service) *Handler {

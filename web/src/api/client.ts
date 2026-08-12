@@ -42,10 +42,13 @@ function userFacingError(message: string, status: number): string {
     "file is infected": "该文件当前不可访问。",
     "share not found": "分享链接不存在或已失效。",
     "share password is required": "该分享链接需要访问密码。",
+    "share password is invalid": "分享链接密码不正确。",
     "invalid share password": "分享链接密码不正确。",
+    "share password attempts are temporarily locked": "密码错误次数过多，请 10 分钟后再试。",
     "share has expired": "分享链接已过期。",
-    "share download limit reached": "该分享链接的下载次数已用完。"
-	,"shared file is not available": "该分享文件暂时不可用，请稍后重试。"
+    "share download limit reached": "该分享链接的下载次数已用完。",
+    "share download rate limit reached": "该分享下载请求过于频繁，请稍后再试。",
+    "shared file is unavailable": "该分享文件暂时不可用，请稍后重试。"
   };
 
   if (messages[message]) return messages[message];
@@ -113,6 +116,14 @@ export const api = {
   revokeInvitation: (id: number) => request<{ invitation: Invitation }>(`/api/admin/invitations/${id}`, { method: "DELETE" }),
   listFiles: (parentId: number | null) =>
     request<{ files: UserFile[] }>(parentId ? `/api/files?parent_id=${parentId}` : "/api/files"),
+  searchFiles: (input: { query?: string; kind?: "image" | "video" | "other"; since?: string; before?: string }) => {
+    const params = new URLSearchParams();
+    if (input.query) params.set("q", input.query);
+    if (input.kind) params.set("kind", input.kind);
+    if (input.since) params.set("since", input.since);
+    if (input.before) params.set("before", input.before);
+    return request<{ files: UserFile[] }>(`/api/files/search?${params.toString()}`);
+  },
   listTrash: () => request<{ files: UserFile[] }>("/api/files/trash"),
   listFolders: (parentId: number | null) =>
     request<{ folders: Folder[] }>(parentId ? `/api/folders?parent_id=${parentId}` : "/api/folders"),

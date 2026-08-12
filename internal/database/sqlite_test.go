@@ -257,6 +257,27 @@ func TestMigrateUserAccessCreatesInvitationAndUserControls(t *testing.T) {
 	}
 }
 
+func TestMigrateCreatesShareAccessAuditConstraints(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if err := Migrate(db, "../../migrations/013_share_access_audit.sql"); err != nil {
+		t.Fatalf("apply share access audit migration: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO share_access_audits (token, ip_hash, action, result) VALUES ('token', 'hashed-ip', 'download', 'allowed')`); err != nil {
+		t.Fatalf("insert audit record: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO share_access_audits (token, ip_hash, action, result) VALUES ('token', 'hashed-ip', 'unknown', 'allowed')`); err == nil {
+		t.Fatal("expected unsupported audit action to fail")
+	}
+	if _, err := db.Exec(`INSERT INTO share_access_audits (token, ip_hash, action, result) VALUES ('token', 'hashed-ip', 'download', 'unknown')`); err == nil {
+		t.Fatal("expected unsupported audit result to fail")
+	}
+}
+
 func TestMigrateCreatesUploadTasksAndChunks(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "cloudbox-test.db"))
 	if err != nil {

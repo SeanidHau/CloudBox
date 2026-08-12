@@ -3,6 +3,7 @@ package file
 import (
 	"database/sql"
 	"errors"
+	"strconv"
 	"time"
 )
 
@@ -284,8 +285,56 @@ func (r *Repository) ListActiveInFolder(
 	return files, nil
 }
 
+func (r *Repository) SearchActive(userID int64, filter SearchFilter) ([]UserFile, error) {
+	query := `SELECT id, user_id, parent_id, original_name, storage_path, size, content_type, status, created_at, deleted_at FROM user_files WHERE user_id = $1 AND status = $2`
+	arguments := []any{userID, StatusActive}
+	next := 3
+	if filter.Query != "" {
+		query += ` AND LOWER(original_name) LIKE LOWER($` + strconv.Itoa(next) + `)`
+		arguments = append(arguments, "%"+filter.Query+"%")
+		next++
+	}
+	switch filter.Kind {
+	case "image":
+		query += ` AND content_type LIKE 'image/%'`
+	case "video":
+		query += ` AND content_type LIKE 'video/%'`
+	case "other":
+		query += ` AND content_type NOT LIKE 'image/%' AND content_type NOT LIKE 'video/%'`
+	}
+	if !filter.CreatedAfter.IsZero() {
+		query += ` AND created_at >= $` + strconv.Itoa(next)
+		arguments = append(arguments, filter.CreatedAfter)
+		next++
+	}
+	if !filter.CreatedBefore.IsZero() {
+		query += ` AND created_at < $` + strconv.Itoa(next)
+		arguments = append(arguments, filter.CreatedBefore)
+	}
+	query += ` ORDER BY created_at DESC`
+	return r.listUserFiles(query, arguments...)
+}
+
 func (r *Repository) ListDeleted(userID int64) ([]UserFile, error) {
 	return r.listByStatus(userID, StatusDeleted)
+}
+
+func (r *Repository) listUserFiles(query string, arguments ...any) ([]UserFile, error) {
+	rows, err := r.db.Query(query, arguments...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	files := make([]UserFile, 0)
+	for rows.Next() {
+		file, err := scanUserFile(rows)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, *file)
+	}
+	return files, rows.Err()
 }
 
 func (r *Repository) SoftDelete(userID int64, fileID int64) error {

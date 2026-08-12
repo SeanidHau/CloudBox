@@ -58,6 +58,7 @@ func main() {
 			"migrations/010_file_preview.sql",
 			"migrations/011_file_scans.sql",
 			"migrations/012_user_access.sql",
+			"migrations/013_share_access_audit.sql",
 		}
 
 	case "postgres":
@@ -69,6 +70,7 @@ func main() {
 			"migrations/postgres/004_file_preview.sql",
 			"migrations/postgres/005_file_scans.sql",
 			"migrations/postgres/006_user_access.sql",
+			"migrations/postgres/007_share_access_audit.sql",
 		}
 
 	default:
@@ -222,7 +224,10 @@ func main() {
 		filerepo,
 		objectStorage,
 		cfg.UserStorageQuotaBytes,
-		append(fileServiceOptions, filemodule.WithStorageQuotaProvider(authRepo))...,
+		append(fileServiceOptions,
+			filemodule.WithStorageQuotaProvider(authRepo),
+			filemodule.WithTrashRetention(cfg.TrashRetention),
+		)...,
 	)
 	jobRunner := jobmodule.NewRunner(
 		jobRepo,
@@ -322,6 +327,7 @@ func main() {
 	ready.POST("/files", fileHandler.Upload)
 	ready.POST("/files/instant", fileHandler.InstantUpload)
 	ready.GET("/files", fileHandler.ListActive)
+	ready.GET("/files/search", fileHandler.Search)
 	ready.GET("/files/trash", fileHandler.ListDeleted)
 	ready.GET("/files/:id/download", fileHandler.Download)
 	ready.GET("/files/:id/preview", fileHandler.Preview)

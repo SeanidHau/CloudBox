@@ -11,7 +11,7 @@ const (
 	DefaultUserStorageQuotaBytes int64 = 1 << 30
 	DefaultRedisUsageCacheTTL          = time.Minute
 	DefaultLogLevel                    = "info"
-	DefaultTrashRetentionHours         = 0
+	DefaultTrashRetentionHours         = 30 * 24
 	DefaultTraceExporter               = "none"
 	DefaultJobWorkerCount              = 1
 	DefaultJobPollInterval             = time.Second

@@ -77,6 +77,14 @@ func WithStorageQuotaProvider(provider StorageQuotaProvider) ServiceOption {
 	}
 }
 
+func WithTrashRetention(retention time.Duration) ServiceOption {
+	return func(service *Service) {
+		if retention > 0 {
+			service.trashRetention = retention
+		}
+	}
+}
+
 func WithJobEnqueuer(enqueuer JobEnqueuer) ServiceOption {
 	return func(service *Service) {
 		if enqueuer != nil {
@@ -108,6 +116,7 @@ type Service struct {
 	storageUsageCache    StorageUsageCache
 	storageUsageCacheTTL time.Duration
 	storageQuotaProvider StorageQuotaProvider
+	trashRetention       time.Duration
 	jobEnqueuer          JobEnqueuer
 	virusScanner         scanner.Scanner
 	virusScanTimeout     time.Duration
@@ -230,6 +239,19 @@ func (s *Service) ListActive(userID int64) ([]UserFile, error) {
 	return s.ListActiveInFolder(userID, nil)
 }
 
+func (s *Service) SearchActive(userID int64, filter SearchFilter) ([]UserFile, error) {
+	files, err := s.repo.SearchActive(userID, filter)
+	if err != nil {
+		return nil, err
+	}
+	for index := range files {
+		if _, err := s.withAvailability(&files[index]); err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
+}
+
 func (s *Service) ListActiveInFolder(
 	userID int64,
 	parentID *int64,
@@ -263,6 +285,10 @@ func (s *Service) ListDeleted(userID int64) ([]UserFile, error) {
 	for index := range files {
 		if _, err := s.withAvailability(&files[index]); err != nil {
 			return nil, err
+		}
+		if files[index].DeletedAt.Valid && s.trashRetention > 0 {
+			cleanupAt := files[index].DeletedAt.Time.Add(s.trashRetention)
+			files[index].CleanupAt = &cleanupAt
 		}
 	}
 
