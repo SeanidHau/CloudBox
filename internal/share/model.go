@@ -19,4 +19,5 @@ type SharedFile struct {
 	StoragePath  string
 	Size         int64
 	ContentType  string
+	FileHash     string
 }

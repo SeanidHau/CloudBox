@@ -751,7 +751,7 @@ func (r *Repository) FindFolderByID(
 	folderID int64,
 ) (*Folder, error) {
 	row := r.db.QueryRow(
-		`SELECT id, user_id, parent_id, name, created_at, updated_at FROM folders WHERE id = $1 AND user_id = $2`,
+		`SELECT id, user_id, parent_id, name, 0 AS size, created_at, updated_at FROM folders WHERE id = $1 AND user_id = $2`,
 		folderID,
 		userID,
 	)
@@ -768,14 +768,55 @@ func (r *Repository) ListFolders(
 		err  error
 	)
 
+	// descendant_folders expands each listed folder into its full subtree. The
+	// grouped sum then gives users a useful folder size without persisting a
+	// value that could become stale after moves, restores, or deletions.
 	if parentID == nil {
 		rows, err = r.db.Query(
-			`SELECT id, user_id, parent_id, name, created_at, updated_at FROM folders WHERE user_id = $1 AND parent_id IS NULL ORDER BY lower(name), id`,
+			`WITH RECURSIVE listed_folders AS (
+				SELECT id, user_id, parent_id, name, created_at, updated_at
+				FROM folders
+				WHERE user_id = $1 AND parent_id IS NULL
+			), descendant_folders(root_id, id) AS (
+				SELECT id, id FROM listed_folders
+				UNION ALL
+				SELECT descendant_folders.root_id, child.id
+				FROM descendant_folders
+				JOIN folders AS child ON child.parent_id = descendant_folders.id
+				WHERE child.user_id = $1
+			)
+			SELECT lf.id, lf.user_id, lf.parent_id, lf.name,
+				COALESCE(SUM(CASE WHEN uf.status = 'active' THEN uf.size ELSE 0 END), 0) AS size,
+				lf.created_at, lf.updated_at
+			FROM listed_folders AS lf
+			JOIN descendant_folders AS df ON df.root_id = lf.id
+			LEFT JOIN user_files AS uf ON uf.parent_id = df.id AND uf.user_id = lf.user_id
+			GROUP BY lf.id, lf.user_id, lf.parent_id, lf.name, lf.created_at, lf.updated_at
+			ORDER BY lower(lf.name), lf.id`,
 			userID,
 		)
 	} else {
 		rows, err = r.db.Query(
-			`SELECT id, user_id, parent_id, name, created_at, updated_at FROM folders WHERE user_id = $1 AND parent_id = $2 ORDER BY lower(name), id`,
+			`WITH RECURSIVE listed_folders AS (
+				SELECT id, user_id, parent_id, name, created_at, updated_at
+				FROM folders
+				WHERE user_id = $1 AND parent_id = $2
+			), descendant_folders(root_id, id) AS (
+				SELECT id, id FROM listed_folders
+				UNION ALL
+				SELECT descendant_folders.root_id, child.id
+				FROM descendant_folders
+				JOIN folders AS child ON child.parent_id = descendant_folders.id
+				WHERE child.user_id = $1
+			)
+			SELECT lf.id, lf.user_id, lf.parent_id, lf.name,
+				COALESCE(SUM(CASE WHEN uf.status = 'active' THEN uf.size ELSE 0 END), 0) AS size,
+				lf.created_at, lf.updated_at
+			FROM listed_folders AS lf
+			JOIN descendant_folders AS df ON df.root_id = lf.id
+			LEFT JOIN user_files AS uf ON uf.parent_id = df.id AND uf.user_id = lf.user_id
+			GROUP BY lf.id, lf.user_id, lf.parent_id, lf.name, lf.created_at, lf.updated_at
+			ORDER BY lower(lf.name), lf.id`,
 			userID,
 			*parentID,
 		)
@@ -818,6 +859,7 @@ func scanFolder(scanner folderScanner) (*Folder, error) {
 		&folder.UserID,
 		&parentID,
 		&folder.Name,
+		&folder.Size,
 		&folder.CreatedAt,
 		&folder.UpdatedAt,
 	)

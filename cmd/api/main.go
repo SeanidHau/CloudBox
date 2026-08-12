@@ -233,7 +233,12 @@ func main() {
 	fileHandler := filemodule.NewHandler(fileService)
 
 	shareRepo := sharemodule.NewRepository(db)
-	shareService := sharemodule.NewService(shareRepo, objectStorage, sharemodule.WithDownloadPolicy(fileService))
+	shareService := sharemodule.NewService(
+		shareRepo,
+		objectStorage,
+		sharemodule.WithDownloadPolicy(fileService),
+		sharemodule.WithFileSaver(fileService),
+	)
 	shareHandler := sharemodule.NewHandler(shareService)
 
 	uploadRepo := uploadmodule.NewRepository(db)
@@ -331,6 +336,7 @@ func main() {
 	protected.DELETE("/folders/:id", fileHandler.DeleteFolder)
 	protected.GET("/storage", fileHandler.GetStorageUsage)
 	protected.POST("/files/:id/shares", shareHandler.Create)
+	protected.POST("/shares/:token/save", shareHandler.Save)
 	protected.GET("/shares", shareHandler.List)
 	protected.DELETE("/shares/:token", shareHandler.Revoke)
 	protected.GET("/jobs/:id", jobHTTPHandler.Get)

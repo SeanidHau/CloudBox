@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	filemodule "github.com/SeanidHau/CloudBox/internal/file"
 	"github.com/SeanidHau/CloudBox/internal/middleware"
 	"github.com/gin-gonic/gin"
 )
@@ -143,6 +144,62 @@ func TestHandlerCreateAndDownloadShare(t *testing.T) {
 	router.ServeHTTP(revokedDownloadRecorder, revokedDownloadRequest)
 	if revokedDownloadRecorder.Code != http.StatusNotFound {
 		t.Fatalf("revoked download status = %d, want %d: %s", revokedDownloadRecorder.Code, http.StatusNotFound, revokedDownloadRecorder.Body.String())
+	}
+}
+
+func TestHandlerSaveSharedFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	repo := newTestRepository(t)
+	fileID := createTestFile(t, repo, 1, "active")
+	fileService := filemodule.NewService(
+		filemodule.NewRepository(repo.db),
+		nil,
+		1024,
+	)
+	service := NewService(repo, nil, WithFileSaver(fileService))
+	share, err := service.Create(1, fileID, "share-password", nil, nil)
+	if err != nil {
+		t.Fatalf("create share: %v", err)
+	}
+
+	router := gin.New()
+	router.POST("/api/shares/:token/save", func(c *gin.Context) {
+		c.Set(middleware.UserIDKey, int64(2))
+		NewHandler(service).Save(c)
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/shares/"+share.Token+"/save",
+		strings.NewReader(`{"password":"share-password"}`),
+	)
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("save status = %d, want %d: %s", recorder.Code, http.StatusCreated, recorder.Body.String())
+	}
+	var response struct {
+		File filemodule.UserFile `json:"file"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode save response: %v", err)
+	}
+	if response.File.UserID != 2 || response.File.OriginalName != "document.txt" {
+		t.Fatalf("saved response file = %#v, want user 2 document.txt", response.File)
+	}
+
+	var objectID int64
+	if err := repo.db.QueryRow(`SELECT object_id FROM user_files WHERE id = $1`, response.File.ID).Scan(&objectID); err != nil {
+		t.Fatalf("find saved file object: %v", err)
+	}
+	var sourceObjectID int64
+	if err := repo.db.QueryRow(`SELECT object_id FROM user_files WHERE id = $1`, fileID).Scan(&sourceObjectID); err != nil {
+		t.Fatalf("find source file object: %v", err)
+	}
+	if objectID != sourceObjectID {
+		t.Fatalf("saved object ID = %d, want source object ID %d", objectID, sourceObjectID)
 	}
 }
 

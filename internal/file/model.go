@@ -33,6 +33,7 @@ type Folder struct {
 	UserID    int64     `json:"user_id"`
 	ParentID  *int64    `json:"parent_id"`
 	Name      string    `json:"name"`
+	Size      int64     `json:"size"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

@@ -115,7 +115,7 @@ func (r *Repository) FindActiveFileByShareToken(token string) (*SharedFile, erro
 	var file SharedFile
 
 	err := r.db.QueryRow(
-		`SELECT uf.object_id, uf.id, uf.original_name, uf.storage_path, uf.size, uf.content_type FROM file_shares AS fs JOIN user_files AS uf ON uf.id = fs.user_file_id WHERE fs.token = $1 AND uf.status = 'active'`,
+		`SELECT fo.id, uf.id, uf.original_name, uf.storage_path, uf.size, uf.content_type, fo.file_hash FROM file_shares AS fs JOIN user_files AS uf ON uf.id = fs.user_file_id JOIN file_objects AS fo ON fo.id = uf.object_id WHERE fs.token = $1 AND uf.status = 'active'`,
 		token,
 	).Scan(
 		&file.ObjectID,
@@ -124,6 +124,7 @@ func (r *Repository) FindActiveFileByShareToken(token string) (*SharedFile, erro
 		&file.StoragePath,
 		&file.Size,
 		&file.ContentType,
+		&file.FileHash,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrFileNotFound
@@ -150,6 +151,16 @@ func (r *Repository) ReserveDownload(token string) (bool, error) {
 	}
 
 	return affected == 1, nil
+}
+
+// ReleaseDownloadReservation compensates for a failed save after the share
+// limit has been reserved. It never allows the counter to become negative.
+func (r *Repository) ReleaseDownloadReservation(token string) error {
+	_, err := r.db.Exec(
+		`UPDATE file_shares SET download_count = download_count - 1 WHERE token = $1 AND download_count > 0`,
+		token,
+	)
+	return err
 }
 
 func (r *Repository) ListByUser(userID int64) ([]Share, error) {

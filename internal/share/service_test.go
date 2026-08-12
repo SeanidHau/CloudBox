@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	filemodule "github.com/SeanidHau/CloudBox/internal/file"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -30,6 +31,35 @@ type fakeDownloadPolicy struct {
 	err          error
 	calls        int
 	fileObjectID int64
+}
+
+type fakeFileSaver struct {
+	err          error
+	userID       int64
+	parentID     *int64
+	originalName string
+	fileHash     string
+}
+
+func (s *fakeFileSaver) InstantUploadIntoFolder(
+	userID int64,
+	parentID *int64,
+	originalName string,
+	fileHash string,
+) (*filemodule.UserFile, error) {
+	s.userID = userID
+	s.parentID = parentID
+	s.originalName = originalName
+	s.fileHash = fileHash
+	if s.err != nil {
+		return nil, s.err
+	}
+
+	return &filemodule.UserFile{
+		ID:           99,
+		UserID:       userID,
+		OriginalName: originalName,
+	}, nil
 }
 
 func (p *fakeDownloadPolicy) CheckFileObjectDownload(fileObjectID int64) error {
@@ -215,6 +245,62 @@ func TestServiceOpenForDownload(t *testing.T) {
 	}
 	if storage.lastReader == nil || !storage.lastReader.closed {
 		t.Fatal("reader should be closed after failing to reserve a download")
+	}
+}
+
+func TestServiceSaveToUserFilesCreatesObjectReference(t *testing.T) {
+	repo := newTestRepository(t)
+	saver := &fakeFileSaver{}
+	service := NewService(repo, nil, WithFileSaver(saver))
+	fileID := createTestFile(t, repo, 1, "active")
+	maxDownloads := int64(2)
+
+	share, err := service.Create(1, fileID, "share-password", nil, &maxDownloads)
+	if err != nil {
+		t.Fatalf("create share: %v", err)
+	}
+
+	saved, err := service.SaveToUserFiles(2, share.Token, "share-password", nil)
+	if err != nil {
+		t.Fatalf("save shared file: %v", err)
+	}
+	if saved.UserID != 2 || saved.OriginalName != "document.txt" {
+		t.Fatalf("saved file = %#v, want target user and source name", saved)
+	}
+	if saver.userID != 2 || saver.originalName != "document.txt" || saver.fileHash == "" {
+		t.Fatalf("saver input = %#v, want target user, source name, and object hash", saver)
+	}
+
+	current, err := repo.FindByToken(share.Token)
+	if err != nil {
+		t.Fatalf("find share: %v", err)
+	}
+	if current.DownloadCount != 1 {
+		t.Fatalf("download count = %d, want 1", current.DownloadCount)
+	}
+}
+
+func TestServiceSaveToUserFilesReleasesReservationOnFailure(t *testing.T) {
+	repo := newTestRepository(t)
+	saver := &fakeFileSaver{err: errors.New("storage quota exceeded")}
+	service := NewService(repo, nil, WithFileSaver(saver))
+	fileID := createTestFile(t, repo, 1, "active")
+	maxDownloads := int64(1)
+
+	share, err := service.Create(1, fileID, "", nil, &maxDownloads)
+	if err != nil {
+		t.Fatalf("create share: %v", err)
+	}
+
+	if _, err := service.SaveToUserFiles(2, share.Token, "", nil); err == nil {
+		t.Fatal("save error = nil, want saver error")
+	}
+	current, err := repo.FindByToken(share.Token)
+	if err != nil {
+		t.Fatalf("find share: %v", err)
+	}
+	if current.DownloadCount != 0 {
+		t.Fatalf("download count after failed save = %d, want 0", current.DownloadCount)
 	}
 }
 

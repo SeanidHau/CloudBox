@@ -8,6 +8,7 @@ import (
 	"io"
 	"time"
 
+	filemodule "github.com/SeanidHau/CloudBox/internal/file"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -19,6 +20,7 @@ var (
 	ErrSharePasswordInvalid   = errors.New("share password is invalid")
 	ErrDownloadLimitReached   = errors.New("share download limit reached")
 	ErrSharedFileUnavailable  = errors.New("shared file is unavailable")
+	ErrShareSaveUnavailable   = errors.New("shared file save is unavailable")
 )
 
 type Storage interface {
@@ -27,6 +29,17 @@ type Storage interface {
 
 type DownloadPolicy interface {
 	CheckFileObjectDownload(fileObject int64) error
+}
+
+// FileSaver is implemented by file.Service. Saving a shared file creates a
+// new user-file reference to the existing object instead of copying its bytes.
+type FileSaver interface {
+	InstantUploadIntoFolder(
+		userID int64,
+		parentID *int64,
+		originalName string,
+		fileHash string,
+	) (*filemodule.UserFile, error)
 }
 
 type ServiceOption func(*Service)
@@ -39,10 +52,19 @@ func WithDownloadPolicy(policy DownloadPolicy) ServiceOption {
 	}
 }
 
+func WithFileSaver(saver FileSaver) ServiceOption {
+	return func(service *Service) {
+		if saver != nil {
+			service.fileSaver = saver
+		}
+	}
+}
+
 type Service struct {
 	repo           *Repository
 	storage        Storage
 	downloadPolicy DownloadPolicy
+	fileSaver      FileSaver
 }
 
 func NewService(repo *Repository, storage Storage, options ...ServiceOption) *Service {
@@ -169,6 +191,62 @@ func (s *Service) OpenForDownload(
 	}
 
 	return file, reader, nil
+}
+
+// SaveToUserFiles adds the shared object to a user's workspace. It applies
+// the same access and scan checks as a public download, while the file module
+// remains responsible for target-folder ownership and storage quota checks.
+func (s *Service) SaveToUserFiles(
+	userID int64,
+	token string,
+	password string,
+	parentID *int64,
+) (*filemodule.UserFile, error) {
+	if s.fileSaver == nil {
+		return nil, ErrShareSaveUnavailable
+	}
+
+	share, err := s.repo.FindByToken(token)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateShareAccess(share, password); err != nil {
+		return nil, err
+	}
+
+	sharedFile, err := s.repo.FindActiveFileByShareToken(token)
+	if err != nil {
+		return nil, err
+	}
+	if s.downloadPolicy != nil {
+		if err := s.downloadPolicy.CheckFileObjectDownload(sharedFile.ObjectID); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrSharedFileUnavailable, err)
+		}
+	}
+
+	reserved, err := s.repo.ReserveDownload(token)
+	if err != nil {
+		return nil, err
+	}
+	if !reserved {
+		return nil, ErrDownloadLimitReached
+	}
+
+	file, err := s.fileSaver.InstantUploadIntoFolder(
+		userID,
+		parentID,
+		sharedFile.OriginalName,
+		sharedFile.FileHash,
+	)
+	if err != nil {
+		// A failed save must not consume an available download slot.
+		if releaseErr := s.repo.ReleaseDownloadReservation(token); releaseErr != nil {
+			return nil, fmt.Errorf("save shared file: %w (release reservation: %v)", err, releaseErr)
+		}
+		return nil, err
+	}
+
+	return file, nil
 }
 
 func validateShareAccess(share *Share, password string) error {

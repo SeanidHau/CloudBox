@@ -826,3 +826,70 @@ func TestRepositoryCreateFindAndListFolders(t *testing.T) {
 		t.Fatal("expected duplicate root folder name to fail")
 	}
 }
+
+func TestRepositoryListFoldersIncludesRecursiveActiveFileSize(t *testing.T) {
+	repo := newTestRepository(t)
+
+	projects, err := repo.CreateFolder(1, nil, "projects")
+	if err != nil {
+		t.Fatalf("create projects folder: %v", err)
+	}
+	archive, err := repo.CreateFolder(1, &projects.ID, "archive")
+	if err != nil {
+		t.Fatalf("create archive folder: %v", err)
+	}
+
+	directFile, err := repo.Create(1, "brief.txt", "uploads/brief.txt", 12, "text/plain")
+	if err != nil {
+		t.Fatalf("create direct file: %v", err)
+	}
+	if _, err := repo.MoveActive(1, directFile.ID, &projects.ID); err != nil {
+		t.Fatalf("move direct file: %v", err)
+	}
+
+	nestedFile, err := repo.Create(1, "history.txt", "uploads/history.txt", 20, "text/plain")
+	if err != nil {
+		t.Fatalf("create nested file: %v", err)
+	}
+	if _, err := repo.MoveActive(1, nestedFile.ID, &archive.ID); err != nil {
+		t.Fatalf("move nested file: %v", err)
+	}
+
+	deletedFile, err := repo.Create(1, "removed.txt", "uploads/removed.txt", 30, "text/plain")
+	if err != nil {
+		t.Fatalf("create deleted file: %v", err)
+	}
+	if _, err := repo.MoveActive(1, deletedFile.ID, &archive.ID); err != nil {
+		t.Fatalf("move deleted file: %v", err)
+	}
+	if err := repo.SoftDelete(1, deletedFile.ID); err != nil {
+		t.Fatalf("soft delete file: %v", err)
+	}
+
+	rootFile, err := repo.Create(1, "root.txt", "uploads/root.txt", 99, "text/plain")
+	if err != nil {
+		t.Fatalf("create root file: %v", err)
+	}
+	if rootFile.ParentID != nil {
+		t.Fatal("root file should not belong to projects")
+	}
+
+	rootFolders, err := repo.ListFolders(1, nil)
+	if err != nil {
+		t.Fatalf("list root folders: %v", err)
+	}
+	if len(rootFolders) != 1 {
+		t.Fatalf("root folders = %#v, want one folder", rootFolders)
+	}
+	if rootFolders[0].Size != 32 {
+		t.Fatalf("projects size = %d, want 32", rootFolders[0].Size)
+	}
+
+	childFolders, err := repo.ListFolders(1, &projects.ID)
+	if err != nil {
+		t.Fatalf("list child folders: %v", err)
+	}
+	if len(childFolders) != 1 || childFolders[0].Size != 20 {
+		t.Fatalf("archive folders = %#v, want nested active size 20", childFolders)
+	}
+}

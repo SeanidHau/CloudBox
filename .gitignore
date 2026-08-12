@@ -11,4 +11,7 @@ bin/
 dist/
 *.exe
 
+# Web frontend dependencies
+web/node_modules/
+
 .env
